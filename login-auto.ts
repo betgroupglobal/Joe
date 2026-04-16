@@ -251,8 +251,15 @@ async function attemptLogin(
     // Log each click result individually
     console.log(`[auto]   click ${attemptNum}/3: ${lastOutcome.outcome} — ${lastOutcome.message || 'no message'}`);
 
-    // Only stop on actual success or 2FA prompt
+    // Stop on success or 2FA prompt
     if (lastOutcome.outcome === 'success' || lastOutcome.outcome === '2fa_required') {
+      break;
+    }
+
+    // If first click returns account_locked with "account has been" — skip to next cred immediately
+    if (attemptNum === 1 && lastOutcome.outcome === 'account_locked' && (lastOutcome.message || '').includes('account has been')) {
+      console.log(`[auto]   account permanently locked — skipping to next cred`);
+      errorStrs.push(lastOutcome.message || 'account has been locked');
       break;
     }
 
@@ -428,8 +435,11 @@ export async function runLoginAuto(
           if (activeVpn) vpnSuccess(activeVpn);
           succeeded++;
           hits.push(attempt);
+        } else if (outcome.outcome === 'account_locked' && (outcome.message || '').includes('account has been')) {
+          // Permanently locked account — no point retrying, move to next cred
+          console.log(`[auto] ✗ account permanently locked: ${username} — moving on`);
         } else if (retryNum < MAX_VISIBLE_ERROR_RETRIES) {
-          // Any non-success after 3 clicks → rotate VPN and retry with fresh session
+          // Any other non-success after 3 clicks → rotate VPN and retry with fresh session
           console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN and retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})...`);
           if (activeVpn) vpnFail(activeVpn);
           activeVpn = rotate();
