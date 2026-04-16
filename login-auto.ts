@@ -261,9 +261,9 @@ async function attemptLogin(
       errorStrs.push(lastOutcome.message);
     }
 
-    // Brief pause between clicks
+    // 1 second wait between clicks
     if (attemptNum < 3) {
-      await page.waitForTimeout(randDelay(1500, 2500));
+      await page.waitForTimeout(1000);
     }
   }
 
