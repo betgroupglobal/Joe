@@ -159,7 +159,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
 
   let postSubmitUrl = page.url();
   let bodyText = (await page.locator('body').innerText().catch(() => '') || '').toLowerCase();
-  const urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
+  let urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
 
   // Fast-path: if URL already changed or clear error text, skip additional wait
   const stillOnLogin = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
@@ -170,6 +170,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
     await page.waitForTimeout(1500);
     postSubmitUrl = page.url();
     bodyText = (await page.locator('body').innerText().catch(() => '') || '').toLowerCase();
+    urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
   }
 
   console.log(`[detect] url: ${postSubmitUrl} (changed=${urlChanged})`);
@@ -556,6 +557,8 @@ export async function runLoginAuto(
   }
 
   // ── Loop through creds ──────────────────────────────────────────────────────
+  // Wrapped in try/finally to ensure buffers are flushed even on unexpected errors
+  try {
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
@@ -665,7 +668,10 @@ export async function runLoginAuto(
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
           // Force browser recycle on connection errors
-          await recycleBrowser();
+          await recycleBrowser().catch(e => {
+            console.error(`[auto] recycleBrowser failed: ${e.message?.split('\n')[0]}`);
+            shouldRetry = false; // can't continue without a browser
+          });
         }
       }
 
@@ -725,13 +731,12 @@ export async function runLoginAuto(
       await new Promise(r => setTimeout(r, delay));
     }
   }
-
-  // ── Flush remaining buffers ─────────────────────────────────────────────────
-  flushResults();
-  flushCredRemovals();
-
-  // ── Close browser ───────────────────────────────────────────────────────────
-  try { await browser.close(); } catch {}
+  } finally {
+    // Always flush buffers, even on unexpected errors
+    flushResults();
+    flushCredRemovals();
+    try { await browser.close(); } catch {}
+  }
 
   // ── Summary ─────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(54)}`);
