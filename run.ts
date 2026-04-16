@@ -3,9 +3,12 @@ import { STEALTH_LAUNCH_ARGS, STEALTH_UA, getStealthContextOptions, humanType, s
 
 import * as readline from 'readline';
 import { scanLogin } from './scanner';
+import { initProxies, nextProxy, getAllProxies, printProxyStats } from './proxy-rotator';
 
 async function launchBrowser() {
-  const proxyUrl = process.env.PROXY_URL || undefined; // set PROXY_URL=socks5://127.0.0.1:51820 when Proton VPN is up
+  const proxy = nextProxy();
+  const proxyUrl = proxy.url;
+  console.log(`[menu] Using proxy: ${proxy.name} (${proxyUrl})`);
   const browser = await chromium.launch({ 
     headless: false, 
     args: STEALTH_LAUNCH_ARGS,
@@ -29,22 +32,13 @@ async function viewLogs() {
   console.log('Scan Logs:', scanLogs.slice(-5));
 }
 
-async function protonProxy() {
-  console.log('Proton VPN: sudo wg-quick up proton_configs/proton-AU232.conf (low fail)');
-  console.log('Proxy URL: socks5://127.0.0.1:51820');
-  console.log('Run login-auto.ts for full automation!');
-}
-
-async function vpnStatus() {
-  console.log('Check: sudo wg show');
-}
-
-async function vpnRotate() {
-  console.log('[menu] VPN rotate: sudo wg-quick down <current> && sudo wg-quick up proton_configs/<new>.conf');
-}
-
-async function vpnDown() {
-  console.log('[menu] VPN down: sudo wg-quick down proton-AU232 (or current tunnel)');
+async function proxyStatus() {
+  const proxies = getAllProxies();
+  console.log(`\n[proxy] ${proxies.length} Hysteria2 SOCKS5 proxies available:`);
+  for (const p of proxies) {
+    console.log(`  ${p.name}: ${p.url} | ok:${p.successes} fail:${p.failures}`);
+  }
+  printProxyStats();
 }
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -53,14 +47,11 @@ async function menu() {
   console.clear();
   console.log(`
 Joe Stealth Menu:
-1. Launch Stealth Browser
+1. Launch Stealth Browser (via Hysteria2 proxy)
 2. Scan Login Form (enter URL)
 3. View Recent Logs
-4. Proton Proxy Guide
-5. VPN Status
-6. VPN Rotate (auto pick best)
-7. VPN Down (disconnect)
-8. Exit
+4. Proxy Status (Hysteria2 SOCKS5 pool)
+5. Exit
   `);
 
   rl.question('Choice: ', async (choice) => {
@@ -78,18 +69,9 @@ Joe Stealth Menu:
         await viewLogs();
         break;
       case '4': 
-        await protonProxy();
+        await proxyStatus();
         break;
-      case '5':
-        await vpnStatus();
-        break;
-      case '6':
-        await vpnRotate();
-        break;
-      case '7':
-        await vpnDown();
-        break;
-      case '8': 
+      case '5': 
         rl.close();
         return;
     }
@@ -97,5 +79,7 @@ Joe Stealth Menu:
   });
 }
 
+// Init Hysteria2 proxy pool on startup
+initProxies();
 menu();
 

@@ -1,6 +1,7 @@
 import { chromium, Page, LaunchOptions, BrowserContextOptions } from 'playwright';
 import * as fs from 'fs';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, randDelay, humanType } from './stealth-utils';
+import { nextProxy } from './proxy-rotator';
 
 export interface ScanResult {
   url: string;
@@ -18,8 +19,9 @@ export interface ScanResult {
 export async function scanLogin(url: string): Promise<ScanResult> {
   if (!url.startsWith('http')) url = 'https://' + url;
 
-  const proxyUrl = process.env.PROXY_URL || undefined;
-  console.log(`[scan] Using proxy: ${proxyUrl ?? '(none)'}`);
+  const proxySlot = nextProxy();
+  const proxyUrl   = proxySlot.url;
+  console.log(`[scan] Using proxy: ${proxySlot.name} (${proxyUrl})`);
 
   const browser = await chromium.launch({ 
     headless: false,

