@@ -6,6 +6,7 @@
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 export interface VpnSlot {
   name: string;        // e.g. "proton-AU-1"
@@ -35,14 +36,46 @@ function shell(cmd: string): string {
   }
 }
 
-/** Get current public IP (with timeout). */
+/** Get current public IPv4 (force -4 to avoid IPv6). */
 export function getPublicIp(): string | null {
   try {
-    const ip = shell('curl -s --max-time 5 https://ifconfig.me');
+    const ip = shell('curl -4 -s --max-time 5 https://ifconfig.me');
     return ip || null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Create an IPv4-only copy of a WireGuard config.
+ * Strips ::/0 and any IPv6 addresses from AllowedIPs and Address,
+ * and sets permissions to 600 to avoid the 'world accessible' warning.
+ */
+function makeIpv4OnlyConfig(originalPath: string): string {
+  const tmpDir = path.join(os.tmpdir(), 'joe-vpn-configs');
+  if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+
+  const basename = path.basename(originalPath);
+  const tmpPath  = path.join(tmpDir, basename);
+
+  let content = fs.readFileSync(originalPath, 'utf8');
+
+  // Remove IPv6 from AllowedIPs: strip ', ::/0' or '::/0, ' or standalone '::/0'
+  content = content.replace(/,\s*::\/0/g, '');
+  content = content.replace(/::\/0\s*,\s*/g, '');
+  content = content.replace(new RegExp('AllowedIPs\\s*=\\s*::\\/0\\s*', 'gi'), 'AllowedIPs = 0.0.0.0/0');
+
+  // Remove IPv6 from Address lines: strip ', <ipv6>/prefix' or '<ipv6>/prefix, '
+  // Matches patterns like ', fd00:abcd::1/128' or 'fd00::1/64, '
+  content = content.replace(new RegExp(',\\s*[0-9a-fA-F:]+\\/\\d+', 'g'), (match) => {
+    return match.includes(':') ? '' : match;
+  });
+  content = content.replace(new RegExp('[0-9a-fA-F:]+\\/\\d+\\s*,\\s*', 'g'), (match) => {
+    return match.includes(':') ? '' : match;
+  });
+
+  fs.writeFileSync(tmpPath, content, { mode: 0o600 });
+  return tmpPath;
 }
 
 // ─── Init ──────────────────────────────────────────────────────────────────────
@@ -90,7 +123,8 @@ export function initProxies(configDir: string = DEFAULT_CONFIG_DIR): VpnSlot[] {
 export function vpnDown(): boolean {
   if (!activeSlot) return true;
   console.log(`[vpn] Bringing down ${activeSlot.name}...`);
-  const result = shell(`sudo wg-quick down "${activeSlot.configPath}" 2>&1`);
+  const ipv4Conf = makeIpv4OnlyConfig(activeSlot.configPath);
+  const result = shell(`sudo wg-quick down "${ipv4Conf}" 2>&1`);
   console.log(`[vpn] ${result || 'done'}`);
   activeSlot = null;
   return true;
@@ -101,8 +135,9 @@ export function vpnUp(slot: VpnSlot): boolean {
   // Bring down current first
   if (activeSlot) vpnDown();
 
-  console.log(`[vpn] Bringing up ${slot.name}...`);
-  const result = shell(`sudo wg-quick up "${slot.configPath}" 2>&1`);
+  console.log(`[vpn] Bringing up ${slot.name} (IPv4-only)...`);
+  const ipv4Conf = makeIpv4OnlyConfig(slot.configPath);
+  const result = shell(`sudo wg-quick up "${ipv4Conf}" 2>&1`);
 
   // Check for specific WireGuard failure patterns (avoid false positives on benign output)
   const failPatterns = ['RTNETLINK', 'Cannot find device', 'Operation not permitted', 'No such file'];
