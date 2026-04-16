@@ -1,0 +1,178 @@
+name: Anti-Detection Workflow Tests
+
+on:
+  # Run on every push to main and PRs
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+  # Periodic schedule — runs every 6 hours to catch anti-bot detection changes
+  schedule:
+    - cron: '0 */6 * * *'   # Every 6 hours: 00:00, 06:00, 12:00, 18:00 UTC
+
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      test_project:
+        description: 'Which test project to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - unit
+          - integration
+          - live
+      run_target_tests:
+        description: 'Run tests against the live target site'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npx playwright test --project=unit
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-test-results
+          path: test-results/
+          retention-days: 30
+
+  integration-tests:
+    name: Integration Tests (Browser)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run integration tests
+        run: npx playwright test --project=integration
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-test-results
+          path: test-results/
+          retention-days: 30
+
+  live-anti-detection-tests:
+    name: Live Anti-Detection Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: integration-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Run live anti-detection tests
+        env:
+          RUN_TARGET_TESTS: ${{ github.event.inputs.run_target_tests == 'true' && '1' || '' }}
+          TARGET_URL: ${{ secrets.TARGET_URL || 'https://www.joefortunepokies.win/login' }}
+        run: npx playwright test --project=live
+
+      - name: Upload test results & screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-test-results
+          path: |
+            test-results/
+            test-results/*.png
+          retention-days: 30
+
+  notify-on-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, live-anti-detection-tests]
+    if: failure() && github.event_name == 'schedule'
+
+    steps:
+      - name: Create failure issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `Anti-Detection Tests Failed — ${new Date().toISOString().split('T')[0]}`;
+            const body = `## Scheduled Anti-Detection Test Failure
+
+            The periodic anti-detection workflow tests have failed. This may indicate:
+
+            - Anti-bot detection has been updated on the target site
+            - Stealth evasion techniques need to be refreshed
+            - Fingerprint poisoning is being detected
+            - Navigator/UA consistency has drifted
+
+            **Run:** [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
+
+            **Action Required:** Review the test results and update stealth-utils.ts / login-auto.ts as needed.`;
+
+            // Check for existing open issue to avoid duplicates
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'anti-detection-failure',
+              per_page: 1,
+            });
+
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['anti-detection-failure', 'automated'],
+              });
+            } else {
+              // Comment on existing issue instead
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues.data[0].number,
+                body: `Another scheduled failure at ${new Date().toISOString()}.\n\n**Run:** [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              });
+            }

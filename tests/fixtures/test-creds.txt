@@ -1,0 +1,8 @@
+# Test credentials file for unit tests
+user1@example.com:password123
+user2@test.com,mypass456
+user3|simplepass
+# Comment line should be skipped
+badlinenoseparator
+344578584:numericuser
+user with spaces@gmail.com:pass word

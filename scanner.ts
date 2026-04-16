@@ -28,13 +28,18 @@ export async function scanLogin(url: string): Promise<ScanResult> {
     ignoreHTTPSErrors: true as any // Bypass strict TS
   } as any);
   // No proxy — traffic routes through the WireGuard VPN interface
+  const ctxOpts = getStealthContextOptions();
   const context = await browser.newContext({
-    ...getStealthContextOptions(),
+    ...ctxOpts,
     ignoreHTTPSErrors: true as any // Bypass strict TS for HTTPS errors
   } as any);
   const page = await context.newPage();
 
-  await injectDeepStealth(page, 'scan-' + Date.now());
+  await injectDeepStealth(page, 'scan-' + Date.now(), {
+    navPlatform: ctxOpts._navPlatform,
+    uaDataPlatform: ctxOpts._uaDataPlatform,
+    chromeVersion: ctxOpts._chromeVersion,
+  });
   await simulateHuman(page);
 
   const results: ScanResult = {

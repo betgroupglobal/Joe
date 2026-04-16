@@ -5,7 +5,11 @@
   "main": "index.js",
   "scripts": {
     "start": "npx ts-node run.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npx playwright test",
+    "test:unit": "npx playwright test --project=unit",
+    "test:integration": "npx playwright test --project=integration",
+    "test:live": "npx playwright test --project=live",
+    "test:live:target": "RUN_TARGET_TESTS=1 npx playwright test --project=live"
   },
   "keywords": [],
   "author": "",
@@ -16,5 +20,8 @@
     "playwright": "^1.59.1",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.59.1"
   }
 }
