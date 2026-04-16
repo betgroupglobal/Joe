@@ -17,4 +17,7 @@ attempt_*.png
 hit_*.png
 debug_form_*.png
 scan_*.png
+test-results/
+playwright-report/
+blob-report/
 
