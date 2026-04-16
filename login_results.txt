@@ -1,0 +1,15 @@
+[2026-04-16T05:55:31.695Z] clintatkinson1@gmail.com | captcha_block | Exists: true | Reason: CAPTCHA logic detected on page | VPN: wg-AU-112
+[2026-04-16T05:56:15.256Z] tinmann1951@gmail.com | captcha_block | Exists: true | Reason: CAPTCHA logic detected on page | VPN: wg-AU-13
+[2026-04-16T05:58:37.839Z] clintatkinson1@gmail.com | wrong_credentials | Exists: true | Reason: incorrect | VPN: wg-AU-112
+[2026-04-16T05:59:18.068Z] tinmann1951@gmail.com | account_locked | Exists: true | Reason: account has been | VPN: wg-AU-116
+[2026-04-16T06:06:46.194Z] Haileygrindallq40@gmail.com | wrong_credentials | Exists: true | Reason: visible error selector triggered | VPN: wg-AU-112
+[2026-04-16T06:07:34.921Z] zailenranson@gmail.com | account_locked | Exists: true | Reason: account has been | VPN: wg-AU-116
+[2026-04-16T06:08:07.512Z] prcooper85@gmail.com | account_locked | Exists: true | Reason: incorrect -> blocked | VPN: wg-AU-13
+[2026-04-16T06:08:46.333Z] kurtruga7@gmail.com | account_locked | Exists: true | Reason: account has been | VPN: wg-AU-136
+[2026-04-16T06:09:25.087Z] benvpisano@gmail.com | account_locked | Exists: true | Reason: account has been | VPN: wg-AU-147-2
+[2026-04-16T06:10:02.834Z] 344578584 | wrong_credentials | Exists: true | Reason: visible error selector triggered | VPN: wg-AU-153-2
+[2026-04-16T06:10:49.466Z] pandacalvin5@gmail.com | account_locked | Exists: true | Reason: account has been | VPN: wg-AU-153
+[2026-04-16T06:11:22.453Z] garensback@gmail.com | account_locked | Exists: true | Reason: incorrect -> blocked | VPN: wg-AU-167
+[2026-04-16T06:12:05.340Z] kelliebarnes@live.com | account_locked | Exists: true | Reason: account has been | VPN: wg-AU-17
+[2026-04-16T06:16:44.899Z] matthewbrianrowe@outlook.com | wrong_credentials | Exists: true | Reason: visible error selector triggered | VPN: wg-AU-112
+[2026-04-16T06:17:27.344Z] Mr.manh.hong.truong@gmail.com | wrong_credentials | Exists: true | Reason: visible error selector triggered | VPN: wg-AU-112

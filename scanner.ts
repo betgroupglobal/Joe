@@ -1,7 +1,7 @@
 import { chromium, Page, LaunchOptions, BrowserContextOptions } from 'playwright';
 import * as fs from 'fs';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, randDelay, humanType } from './stealth-utils';
-import { rotate, recordSuccess, recordFail, PROXY_URL } from './vpn-rotator';
+import { getActiveSlot } from './proxy-rotator';
 
 export interface ScanResult {
   url: string;
@@ -19,27 +19,17 @@ export interface ScanResult {
 export async function scanLogin(url: string): Promise<ScanResult> {
   if (!url.startsWith('http')) url = 'https://' + url;
 
-  // ── VPN rotation: ensure a working tunnel is active ──────────────────────
-  const failedTunnels = new Set<string>();
-  let activeName: string | null = null;
-
-  try {
-    activeName = await rotate(failedTunnels);
-  } catch (e: any) {
-    console.error('[scan] VPN rotation failed:', e.message);
-    activeName = null;
-  }
-
-  const proxyUrl = activeName ? PROXY_URL : (process.env.PROXY_URL || undefined);
-  console.log(`[scan] Using proxy: ${proxyUrl ?? '(none)'} | tunnel: ${activeName ?? 'none'}`);
+  const activeVpn = getActiveSlot();
+  console.log(`[scan] Using VPN: ${activeVpn?.name ?? '(none — traffic goes direct)'}`);
 
   const browser = await chromium.launch({ 
-    headless: false,
+    headless: true,
     args: STEALTH_LAUNCH_ARGS,
     ignoreHTTPSErrors: true as any // Bypass strict TS
   } as any);
+  // No proxy — traffic routes through the WireGuard VPN interface
   const context = await browser.newContext({
-    ...getStealthContextOptions(proxyUrl),
+    ...getStealthContextOptions(),
     ignoreHTTPSErrors: true as any // Bypass strict TS for HTTPS errors
   } as any);
   const page = await context.newPage();
@@ -71,6 +61,24 @@ export async function scanLogin(url: string): Promise<ScanResult> {
     // Wait for network to settle (up to 15s) then proceed regardless
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(randDelay(2000, 5000));
+
+    try {
+      const loginNavBtn = 'body > div.ol-pos_sticky.ol-top_0.ol-z_docked > div > header > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__loggedOut.ol-headerRight__loggedOut--variant_center.ol-headerRight__loggedOut--size_lg > div > a';
+      if (await page.isVisible(loginNavBtn)) {
+        console.log('Clicking main Login navigation button to open form...');
+        await page.click(loginNavBtn, { timeout: 5000 });
+        await page.waitForTimeout(2000);
+      } else {
+        const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login")');
+        if (genericBtn && await genericBtn.isVisible()) {
+          console.log('Clicking generic Login text button...');
+          await genericBtn.click();
+          await page.waitForTimeout(2000);
+        }
+      }
+    } catch (e: any) {
+      console.log('Login nav button check failed', e.message);
+    }
 
     // Screenshot for debug
     await page.screenshot({ path: `./scan_${Date.now()}.png`, fullPage: true });
@@ -120,7 +128,7 @@ export async function scanLogin(url: string): Promise<ScanResult> {
 
       const usernameCss = buildSel(usernameEl, 'input[type="email"], input[type="text"]');
       const passwordCss = buildSel(passwordEl, 'input[type="password"]');
-      const submitCss   = buildSel(submitEl,   'button[type="submit"]');
+      const submitCss   = '#loginSubmit';
 
       await humanType(page, usernameCss, 'stealthuser@example.com');
       await humanType(page, passwordCss, 'DemoPass123!');
@@ -129,24 +137,31 @@ export async function scanLogin(url: string): Promise<ScanResult> {
       console.log('Auto-login attempted:', results.auto_login);
 
       // Log to login_results.json
-      const loginLogs = JSON.parse(fs.readFileSync('./login_results.json', 'utf8'));
+      let loginLogs: any[] = [];
+      try {
+        loginLogs = JSON.parse(fs.readFileSync('./login_results.json', 'utf8'));
+      } catch {
+        // File doesn't exist or is invalid — start fresh
+      }
       loginLogs.push({ url, timestamp: results.timestamp, auto_login: results.auto_login });
       fs.writeFileSync('./login_results.json', JSON.stringify(loginLogs, null, 2));
     }
 
-    const loadMs = Date.now() - new Date(results.timestamp).getTime();
-    if (activeName) recordSuccess(activeName, loadMs);
     console.log(`Scan complete: ${results.selectors.length} selectors, screenshot saved`);
   } catch (error: any) {
     console.error('Scan error:', error.message);
     results.error = error.message;
-    if (activeName) recordFail(activeName);
     await page.screenshot({ path: `./scan_error_${Date.now()}.png`, fullPage: true });
     results.selectors = [];
   }
 
   // Log to file
-  const logs = JSON.parse(fs.readFileSync('./scan_results.json', 'utf8'));
+  let logs: any[] = [];
+  try {
+    logs = JSON.parse(fs.readFileSync('./scan_results.json', 'utf8'));
+  } catch {
+    // File doesn't exist or is invalid — start fresh
+  }
   logs.push(results);
   fs.writeFileSync('./scan_results.json', JSON.stringify(logs, null, 2));
 
