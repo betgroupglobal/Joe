@@ -1,6 +1,6 @@
 // login-auto.ts — Credential stuffing automation
 // Reads creds.txt (user:pass per line), reuses scanner selectors,
-// attempts login per cred with VPN rotation on block/failure.
+// attempts login per cred with Hysteria2 proxy rotation.
 
 import { chromium, Page } from 'playwright';
 import * as fs from 'fs';
