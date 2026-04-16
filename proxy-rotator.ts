@@ -104,7 +104,9 @@ export function vpnUp(slot: VpnSlot): boolean {
   console.log(`[vpn] Bringing up ${slot.name}...`);
   const result = shell(`sudo wg-quick up "${slot.configPath}" 2>&1`);
 
-  if (result.includes('error') || result.includes('RTNETLINK')) {
+  // Check for specific WireGuard failure patterns (avoid false positives on benign output)
+  const failPatterns = ['RTNETLINK', 'Cannot find device', 'Operation not permitted', 'No such file'];
+  if (failPatterns.some(p => result.includes(p))) {
     console.error(`[vpn] Failed to bring up ${slot.name}: ${result}`);
     return false;
   }

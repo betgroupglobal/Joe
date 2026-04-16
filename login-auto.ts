@@ -50,7 +50,12 @@ export function loadCreds(filePath: string = './creds.txt'): Array<{ username: s
 const LOGIN_LOG = './login_results.json';
 
 function appendResult(attempt: LoginAttempt): void {
-  const logs: LoginAttempt[] = JSON.parse(fs.readFileSync(LOGIN_LOG, 'utf8'));
+  let logs: LoginAttempt[] = [];
+  try {
+    logs = JSON.parse(fs.readFileSync(LOGIN_LOG, 'utf8'));
+  } catch {
+    // File doesn't exist or is invalid — start fresh
+  }
   logs.push(attempt);
   fs.writeFileSync(LOGIN_LOG, JSON.stringify(logs, null, 2));
 }
@@ -184,7 +189,12 @@ export async function runLoginAuto(
 
   // ── Get selectors from scan_results.json (most recent with selectors) ───────
   let selectors: ScanResult['selectors'] = [];
-  const scanLog: ScanResult[] = JSON.parse(fs.readFileSync('./scan_results.json', 'utf8'));
+  let scanLog: ScanResult[] = [];
+  try {
+    scanLog = JSON.parse(fs.readFileSync('./scan_results.json', 'utf8'));
+  } catch {
+    // File doesn't exist or is invalid — will run scanner
+  }
   const withSelectors = scanLog.filter(r => r.url === targetUrl && r.selectors.length > 0);
 
   if (withSelectors.length > 0) {
@@ -211,9 +221,9 @@ export async function runLoginAuto(
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
-    // Rotate VPN for each new credential pair
-    if (i > 0) {
-      console.log(`\n[auto] Rotating VPN for next credential...`);
+    // Rotate VPN based on rotateEvery setting (default 1 = every cred)
+    if (i > 0 && i % rotateEvery === 0) {
+      console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
       activeVpn = rotate();
       if (!activeVpn) {
         console.warn('[auto] VPN rotation failed — continuing with current connection.');
@@ -308,8 +318,19 @@ export async function runLoginAuto(
   console.log(`${'─'.repeat(54)}\n`);
 }
 
+// ── Graceful shutdown — tear down VPN on exit ─────────────────────────────────
+function cleanup() {
+  console.log('\n[auto] Shutting down — disconnecting VPN...');
+  vpnDown();
+  process.exit(0);
+}
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
+
 // ── Allow direct execution ────────────────────────────────────────────────────
 if (require.main === module) {
   const url = process.argv[2] || 'https://joefortunepokies.win/login';
-  runLoginAuto(url).catch(e => { console.error(e); process.exit(1); });
+  runLoginAuto(url)
+    .then(() => { vpnDown(); })
+    .catch(e => { console.error(e); vpnDown(); process.exit(1); });
 }

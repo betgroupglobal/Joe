@@ -23,7 +23,7 @@ export async function scanLogin(url: string): Promise<ScanResult> {
   console.log(`[scan] Using VPN: ${activeVpn?.name ?? '(none — traffic goes direct)'}`);
 
   const browser = await chromium.launch({ 
-    headless: false,
+    headless: true,
     args: STEALTH_LAUNCH_ARGS,
     ignoreHTTPSErrors: true as any // Bypass strict TS
   } as any);
@@ -119,7 +119,12 @@ export async function scanLogin(url: string): Promise<ScanResult> {
       console.log('Auto-login attempted:', results.auto_login);
 
       // Log to login_results.json
-      const loginLogs = JSON.parse(fs.readFileSync('./login_results.json', 'utf8'));
+      let loginLogs: any[] = [];
+      try {
+        loginLogs = JSON.parse(fs.readFileSync('./login_results.json', 'utf8'));
+      } catch {
+        // File doesn't exist or is invalid — start fresh
+      }
       loginLogs.push({ url, timestamp: results.timestamp, auto_login: results.auto_login });
       fs.writeFileSync('./login_results.json', JSON.stringify(loginLogs, null, 2));
     }
@@ -133,7 +138,12 @@ export async function scanLogin(url: string): Promise<ScanResult> {
   }
 
   // Log to file
-  const logs = JSON.parse(fs.readFileSync('./scan_results.json', 'utf8'));
+  let logs: any[] = [];
+  try {
+    logs = JSON.parse(fs.readFileSync('./scan_results.json', 'utf8'));
+  } catch {
+    // File doesn't exist or is invalid — start fresh
+  }
   logs.push(results);
   fs.writeFileSync('./scan_results.json', JSON.stringify(logs, null, 2));
 
