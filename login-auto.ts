@@ -311,7 +311,7 @@ export async function runLoginAuto(
   } = {}
 ): Promise<void> {
   const {
-    delayBetweenMs = [4000, 10000],
+    delayBetweenMs = [1000, 1000],
     rotateEvery    = 0,
     stopOnSuccess  = false,
   } = options;
@@ -483,8 +483,8 @@ export async function runLoginAuto(
 
       // Immediate retry on visible error selector, 2s delay otherwise
       if (!(attempt as any)._immediateRetry) {
-        console.log(`[auto] Waiting 2s before retry...`);
-        await new Promise(r => setTimeout(r, 2000));
+        console.log(`[auto] Waiting 1s before retry...`);
+        await new Promise(r => setTimeout(r, 1000));
       }
       console.log(`[auto] Retrying with new VPN: ${vpnName} + fresh fingerprint`);
     }
