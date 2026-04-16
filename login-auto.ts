@@ -186,14 +186,14 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
   }
 
   // 4. THE NEGATIVE SELECTION RULE: Default to Success
-  // We assume success if no failure signals exist and we aren't stuck on the login URL
+  // Only count as success if we navigated AWAY from a login/signin page
   const onLoginPath = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
   
-  if (urlChanged || !onLoginPath) {
+  if (!onLoginPath) {
     return { 
       outcome: 'success', 
       accountExists: true, 
-      message: `Navigated successfully to: ${postSubmitUrl.split('?')[0]}` 
+      message: `Navigated to: ${postSubmitUrl.split('?')[0]}` 
     };
   }
 
