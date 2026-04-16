@@ -28,13 +28,18 @@ export async function scanLogin(url: string): Promise<ScanResult> {
     ignoreHTTPSErrors: true as any // Bypass strict TS
   } as any);
   // No proxy — traffic routes through the WireGuard VPN interface
+  const ctxOpts = getStealthContextOptions();
   const context = await browser.newContext({
-    ...getStealthContextOptions(),
+    ...ctxOpts,
     ignoreHTTPSErrors: true as any // Bypass strict TS for HTTPS errors
   } as any);
   const page = await context.newPage();
 
-  await injectDeepStealth(page, 'scan-' + Date.now());
+  await injectDeepStealth(page, 'scan-' + Date.now(), {
+    navPlatform: ctxOpts._navPlatform,
+    uaDataPlatform: ctxOpts._uaDataPlatform,
+    chromeVersion: ctxOpts._chromeVersion,
+  });
   await simulateHuman(page);
 
   const results: ScanResult = {
@@ -57,23 +62,23 @@ export async function scanLogin(url: string): Promise<ScanResult> {
   });
 
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    // Wait for network to settle (up to 15s) then proceed regardless
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    await page.waitForTimeout(randDelay(2000, 5000));
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // Wait for network to settle (reduced from 15s to 8s)
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(randDelay(1000, 3000));
 
     try {
       const loginNavBtn = 'body > div.ol-pos_sticky.ol-top_0.ol-z_docked > div > header > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__loggedOut.ol-headerRight__loggedOut--variant_center.ol-headerRight__loggedOut--size_lg > div > a';
       if (await page.isVisible(loginNavBtn)) {
         console.log('Clicking main Login navigation button to open form...');
         await page.click(loginNavBtn, { timeout: 5000 });
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(1000);
       } else {
         const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login")');
         if (genericBtn && await genericBtn.isVisible()) {
           console.log('Clicking generic Login text button...');
           await genericBtn.click();
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(1000);
         }
       }
     } catch (e: any) {

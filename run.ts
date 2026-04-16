@@ -20,12 +20,17 @@ async function launchBrowser() {
     ignoreHTTPSErrors: true as any
   } as any);
   // No proxy — traffic routes through the WireGuard VPN interface
+  const ctxOpts = getStealthContextOptions();
   const context = await browser.newContext({
-    ...getStealthContextOptions(),
+    ...ctxOpts,
     ignoreHTTPSErrors: true as any
   } as any);
   const page = await context.newPage();
-  await injectDeepStealth(page, 'menu-session-' + Date.now());
+  await injectDeepStealth(page, 'menu-session-' + Date.now(), {
+    navPlatform: ctxOpts._navPlatform,
+    uaDataPlatform: ctxOpts._uaDataPlatform,
+    chromeVersion: ctxOpts._chromeVersion,
+  });
 
   console.log('Browser launched. Close to return to menu.');
   await new Promise(r => browser.on('disconnected', r));

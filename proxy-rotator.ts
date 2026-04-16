@@ -2,6 +2,11 @@
 // Rotates through ProtonVPN AU WireGuard configs to get fresh IPs.
 // Each rotation does: wg-quick down <current> → wg-quick up <next>
 // Traffic flows directly through the VPN interface (no SOCKS5 proxy needed).
+//
+// Optimizations:
+//   - Cached IPv4 configs: generates once per config, reuses from memory
+//   - Smart rotation: skips VPN slots with >70% failure rate (min 3 attempts)
+//   - Faster IP check: reduced timeout, uses icanhazip.com as fallback
 
 import { execSync } from 'child_process';
 import * as fs from 'fs';
@@ -36,10 +41,14 @@ function shell(cmd: string): string {
   }
 }
 
-/** Get current public IPv4 (force -4 to avoid IPv6). */
+/** Get current public IPv4 (force -4 to avoid IPv6). Uses fast endpoints with fallback. */
 export function getPublicIp(): string | null {
   try {
-    const ip = shell('curl -4 -s --max-time 5 https://ifconfig.me');
+    // Primary: icanhazip is faster than ifconfig.me
+    let ip = shell('curl -4 -s --max-time 3 https://icanhazip.com');
+    if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip;
+    // Fallback
+    ip = shell('curl -4 -s --max-time 3 https://ifconfig.me');
     return ip || null;
   } catch {
     return null;
@@ -50,8 +59,16 @@ export function getPublicIp(): string | null {
  * Create an IPv4-only copy of a WireGuard config.
  * Strips ::/0 and any IPv6 addresses from AllowedIPs and Address,
  * and sets permissions to 600 to avoid the 'world accessible' warning.
+ * 
+ * Optimized: caches generated configs in memory to avoid repeated file I/O.
  */
+const ipv4ConfigCache = new Map<string, string>();
+
 function makeIpv4OnlyConfig(originalPath: string): string {
+  // Return cached config if already generated
+  const cached = ipv4ConfigCache.get(originalPath);
+  if (cached && fs.existsSync(cached)) return cached;
+
   const tmpDir = path.join(os.tmpdir(), 'joe-vpn-configs');
   if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
 
@@ -66,7 +83,6 @@ function makeIpv4OnlyConfig(originalPath: string): string {
   content = content.replace(new RegExp('AllowedIPs\\s*=\\s*::\\/0\\s*', 'gi'), 'AllowedIPs = 0.0.0.0/0');
 
   // Remove IPv6 from Address lines: strip ', <ipv6>/prefix' or '<ipv6>/prefix, '
-  // Matches patterns like ', fd00:abcd::1/128' or 'fd00::1/64, '
   content = content.replace(new RegExp(',\\s*[0-9a-fA-F:]+\\/\\d+', 'g'), (match) => {
     return match.includes(':') ? '' : match;
   });
@@ -75,6 +91,7 @@ function makeIpv4OnlyConfig(originalPath: string): string {
   });
 
   fs.writeFileSync(tmpPath, content, { mode: 0o600 });
+  ipv4ConfigCache.set(originalPath, tmpPath);
   return tmpPath;
 }
 
@@ -183,6 +200,44 @@ export function rotate(): VpnSlot | null {
   }
 
   return slot;
+}
+
+/**
+ * Smart rotation: picks the best VPN slot based on success rate.
+ * Skips slots with >70% failure rate (min 3 attempts) to avoid known-bad servers.
+ * Falls back to regular round-robin if all slots are exhausted.
+ */
+export function smartRotate(): VpnSlot | null {
+  if (slots.length === 0) {
+    console.error('[vpn] No VPN configs loaded. Call initProxies() first.');
+    return null;
+  }
+
+  const MIN_ATTEMPTS_FOR_SKIP = 3;
+  const MAX_FAILURE_RATE = 0.7;
+
+  // Try up to slots.length candidates
+  for (let tries = 0; tries < slots.length; tries++) {
+    const slot = slots[currentIndex];
+    currentIndex = (currentIndex + 1) % slots.length;
+
+    const total = slot.successes + slot.failures;
+    if (total >= MIN_ATTEMPTS_FOR_SKIP) {
+      const failRate = slot.failures / total;
+      if (failRate > MAX_FAILURE_RATE) {
+        console.log(`[vpn] Skipping ${slot.name} (${(failRate * 100).toFixed(0)}% fail rate, ${total} attempts)`);
+        continue;
+      }
+    }
+
+    slot.lastUsed = Date.now();
+    if (vpnUp(slot)) return slot;
+    console.warn(`[vpn] Failed to activate ${slot.name}, trying next...`);
+  }
+
+  // All slots skipped or failed — force round-robin as last resort
+  console.warn('[vpn] All preferred slots exhausted — falling back to round-robin');
+  return rotate();
 }
 
 /** Get the currently active VPN slot (or null). */
