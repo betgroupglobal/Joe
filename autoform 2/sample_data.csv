@@ -1,0 +1,4 @@
+first_name,last_name,email,password,dob,phone,address,city,state,zip_code,country,username,gender,pin
+Alice,Smith,alice.smith@gmail.com,Passw0rd!2024,1992-04-15,0412345678,12 Oak Street,Sydney,NSW,2000,AU,alice_smith,female,4821
+Bob,Johnson,bob.johnson@gmail.com,S3cur3P@ss!,1988-07-22,0423456789,45 Maple Ave,Melbourne,VIC,3000,AU,bobjohnson,male,7364
+Carol,Davis,carol.davis@gmail.com,MyP@ssword99,1995-11-03,0434567890,78 Pine Road,Brisbane,QLD,4000,AU,carol_d,female,2958
