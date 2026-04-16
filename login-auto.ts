@@ -88,15 +88,19 @@ function appendResult(attempt: LoginAttempt): void {
 
 function flushResults(): void {
   if (resultBuffer.length === 0) return;
-  let logs: LoginAttempt[] = [];
   try {
-    logs = JSON.parse(fs.readFileSync(LOGIN_LOG, 'utf8'));
-  } catch {
-    // File doesn't exist or is invalid — start fresh
+    let logs: LoginAttempt[] = [];
+    try {
+      logs = JSON.parse(fs.readFileSync(LOGIN_LOG, 'utf8'));
+    } catch {
+      // File doesn't exist or is invalid — start fresh
+    }
+    logs.push(...resultBuffer);
+    fs.writeFileSync(LOGIN_LOG, JSON.stringify(logs, null, 2));
+    resultBuffer = [];
+  } catch (e) {
+    console.error(`[auto] Failed to flush results:`, e);
   }
-  logs.push(...resultBuffer);
-  fs.writeFileSync(LOGIN_LOG, JSON.stringify(logs, null, 2));
-  resultBuffer = [];
 }
 
 // ─── Buffered credential removal ────────────────────────────────────────────────
