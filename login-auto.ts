@@ -150,16 +150,23 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
   // 3. Standard Failure Detection
   const failureMsg = SIGNALS.failure.keywords.find(s => bodyText.includes(s));
   
-  // Check visible error selectors — only count if element has meaningful error text
+  // Check visible error selectors — only count if element text contains error-related words
+  const ERROR_WORDS = [
+    'invalid', 'incorrect', 'wrong', 'error', 'fail', 'denied',
+    'locked', 'disabled', 'blocked', 'expired', 'suspend',
+    'limit', 'try again', 'unable', 'not found', 'not recognized',
+    'does not exist', 'temporarily', 'captcha', 'verify'
+  ];
   let hasVisibleError = false;
   let visibleErrorDetail = '';
   for (const selector of SIGNALS.failure.selectors) {
     const locator = page.locator(selector).first();
     if (await locator.isVisible().catch(() => false)) {
       const elText = (await locator.innerText().catch(() => '') || '').trim().toLowerCase();
-      console.log(`[detect] Visible error selector: ${selector} | text: "${elText.substring(0, 120)}"`);
-      // Only count as real error if it has meaningful text (not empty, not just whitespace)
-      if (elText.length > 2) {
+      // Only count if the text actually contains error-related keywords
+      const hasErrorWord = ERROR_WORDS.some(w => elText.includes(w));
+      if (hasErrorWord) {
+        console.log(`[detect] Error selector: ${selector} | text: "${elText.substring(0, 120)}"`);
         hasVisibleError = true;
         visibleErrorDetail = `visible error [${selector}]: "${elText.substring(0, 80)}"`;
         break;
