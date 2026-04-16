@@ -150,13 +150,20 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
   // 3. Standard Failure Detection
   const failureMsg = SIGNALS.failure.keywords.find(s => bodyText.includes(s));
   
-  // Check visible error selectors
+  // Check visible error selectors — only count if element has meaningful error text
   let hasVisibleError = false;
+  let visibleErrorDetail = '';
   for (const selector of SIGNALS.failure.selectors) {
     const locator = page.locator(selector).first();
     if (await locator.isVisible().catch(() => false)) {
-      hasVisibleError = true;
-      break;
+      const elText = (await locator.innerText().catch(() => '') || '').trim().toLowerCase();
+      console.log(`[detect] Visible error selector: ${selector} | text: "${elText.substring(0, 120)}"`);
+      // Only count as real error if it has meaningful text (not empty, not just whitespace)
+      if (elText.length > 2) {
+        hasVisibleError = true;
+        visibleErrorDetail = `visible error [${selector}]: "${elText.substring(0, 80)}"`;
+        break;
+      }
     }
   }
 
@@ -167,7 +174,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
     return { 
       outcome: 'wrong_credentials', 
       accountExists: !notFound,
-      message: failureMsg || 'visible error selector triggered'
+      message: failureMsg || visibleErrorDetail || 'visible error selector triggered'
     };
   }
 
