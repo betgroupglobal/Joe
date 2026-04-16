@@ -99,6 +99,34 @@ function flushResults(): void {
   resultBuffer = [];
 }
 
+// ─── Buffered credential removal ────────────────────────────────────────────────
+// Module-scope so cleanup() can flush on SIGINT/SIGTERM.
+
+let activeCredsFile: string = './creds.txt'; // set by runLoginAuto
+let credRemoveBuffer: Array<{ username: string; password: string }> = [];
+
+function flushCredRemovals(): void {
+  if (credRemoveBuffer.length === 0) return;
+  try {
+    const rawCreds = fs.readFileSync(activeCredsFile, 'utf8');
+    const toRemove = new Set(credRemoveBuffer.map(c => `${c.username}\t${c.password}`));
+    const filtered = rawCreds.split('\n').filter(l => {
+      if (!l.trim() || l.trim().startsWith('#')) return true;
+      const trimmed = l.trim();
+      const sep = trimmed.includes(':') ? ':' : trimmed.includes(',') ? ',' : '|';
+      const idx = trimmed.indexOf(sep);
+      if (idx === -1) return true;
+      const u = trimmed.slice(0, idx).trim();
+      const p = trimmed.slice(idx + 1).trim();
+      return !toRemove.has(`${u}\t${p}`);
+    });
+    fs.writeFileSync(activeCredsFile, filtered.join('\n'));
+    credRemoveBuffer = [];
+  } catch (e) {
+    console.error(`[auto] Failed to flush credential removals:`, e);
+  }
+}
+
 // ─── Post-Submit Outcome Detection ───────────────────────────────────────────
 
 const SIGNALS = {
@@ -492,7 +520,8 @@ export async function runLoginAuto(
   let attempted = 0;
   let succeeded = 0;
   const hits: LoginAttempt[] = [];
-  let credRemoveBuffer: Array<{ username: string; password: string }> = [];
+  // Set module-level credsFile for cleanup handler access
+  activeCredsFile = credsFile;
 
   const MAX_VISIBLE_ERROR_RETRIES = 3;
 
@@ -524,29 +553,6 @@ export async function runLoginAuto(
       ignoreHTTPSErrors: true as any,
     } as any);
     browserCredsProcessed = 0;
-  }
-
-  // ── Batch cred removal helper ───────────────────────────────────────────────
-  function flushCredRemovals(): void {
-    if (credRemoveBuffer.length === 0) return;
-    try {
-      const rawCreds = fs.readFileSync(credsFile, 'utf8');
-      const toRemove = new Set(credRemoveBuffer.map(c => `${c.username}\t${c.password}`));
-      const filtered = rawCreds.split('\n').filter(l => {
-        if (!l.trim() || l.trim().startsWith('#')) return true;
-        const trimmed = l.trim();
-        const sep = trimmed.includes(':') ? ':' : trimmed.includes(',') ? ',' : '|';
-        const idx = trimmed.indexOf(sep);
-        if (idx === -1) return true;
-        const u = trimmed.slice(0, idx).trim();
-        const p = trimmed.slice(idx + 1).trim();
-        return !toRemove.has(`${u}\t${p}`);
-      });
-      fs.writeFileSync(credsFile, filtered.join('\n'));
-      credRemoveBuffer = [];
-    } catch (e) {
-      console.error(`[auto] Failed to flush credential removals:`, e);
-    }
   }
 
   // ── Loop through creds ──────────────────────────────────────────────────────
@@ -745,6 +751,7 @@ export async function runLoginAuto(
 function cleanup() {
   console.log('\n[auto] Shutting down — flushing buffers and disconnecting VPN...');
   flushResults();
+  flushCredRemovals();
   vpnDown();
   process.exit(0);
 }
