@@ -469,7 +469,12 @@ export async function injectDeepStealth(
     });
 
     // ─── 5. User-Agent Client Hints (navigatorUAData) ───────────────────
-    const fullVersion = `${chromeVersion}.0.6998.178`;
+    const CHROME_FULL_VERSIONS: Record<string, string> = {
+      '134': '134.0.6998.178',
+      '133': '133.0.6943.142',
+      '132': '132.0.6834.159',
+    };
+    const fullVersion = CHROME_FULL_VERSIONS[chromeVersion] || `${chromeVersion}.0.6998.178`;
     const arch = uaDataPlatform === 'macOS' ? 'arm' : 'x86';
     const platVer = uaDataPlatform === 'Windows' ? '15.0.0' : uaDataPlatform === 'macOS' ? '14.5.0' : '6.5.0';
 
