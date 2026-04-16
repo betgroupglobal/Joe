@@ -62,6 +62,24 @@ export async function scanLogin(url: string): Promise<ScanResult> {
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(randDelay(2000, 5000));
 
+    try {
+      const loginNavBtn = 'body > div.ol-pos_sticky.ol-top_0.ol-z_docked > div > header > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__loggedOut.ol-headerRight__loggedOut--variant_center.ol-headerRight__loggedOut--size_lg > div > a';
+      if (await page.isVisible(loginNavBtn)) {
+        console.log('Clicking main Login navigation button to open form...');
+        await page.click(loginNavBtn, { timeout: 5000 });
+        await page.waitForTimeout(2000);
+      } else {
+        const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login")');
+        if (genericBtn && await genericBtn.isVisible()) {
+          console.log('Clicking generic Login text button...');
+          await genericBtn.click();
+          await page.waitForTimeout(2000);
+        }
+      }
+    } catch (e: any) {
+      console.log('Login nav button check failed', e.message);
+    }
+
     // Screenshot for debug
     await page.screenshot({ path: `./scan_${Date.now()}.png`, fullPage: true });
 
@@ -110,7 +128,7 @@ export async function scanLogin(url: string): Promise<ScanResult> {
 
       const usernameCss = buildSel(usernameEl, 'input[type="email"], input[type="text"]');
       const passwordCss = buildSel(passwordEl, 'input[type="password"]');
-      const submitCss   = buildSel(submitEl,   'button[type="submit"]');
+      const submitCss   = '#loginSubmit';
 
       await humanType(page, usernameCss, 'stealthuser@example.com');
       await humanType(page, passwordCss, 'DemoPass123!');

