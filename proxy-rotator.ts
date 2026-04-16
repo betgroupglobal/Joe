@@ -49,7 +49,7 @@ export function getPublicIp(): string | null {
     if (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip;
     // Fallback
     ip = shell('curl -4 -s --max-time 3 https://ifconfig.me');
-    return ip || null;
+    return (ip && /^\d+\.\d+\.\d+\.\d+$/.test(ip)) ? ip : null;
   } catch {
     return null;
   }

@@ -167,7 +167,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
 
   // Fast-path: if URL already changed or clear error text, skip additional wait
   const stillOnLogin = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
-  const hasQuickSignal = urlChanged || SIGNALS.failure.keywords.some(s => bodyText.includes(s)) || SIGNALS.rateLimit.lockout.some(s => bodyText.includes(s));
+  const hasQuickSignal = (urlChanged && !stillOnLogin) || SIGNALS.failure.keywords.some(s => bodyText.includes(s)) || SIGNALS.rateLimit.lockout.some(s => bodyText.includes(s));
 
   if (!hasQuickSignal) {
     // No clear signal yet — wait a bit more for the page to settle
