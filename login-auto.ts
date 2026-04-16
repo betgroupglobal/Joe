@@ -263,6 +263,13 @@ async function attemptLogin(
       break;
     }
 
+    // Visible error selector = likely detection/block — break immediately so outer loop can rotate VPN
+    if ((lastOutcome.message || '').includes('visible error selector triggered')) {
+      console.log(`[auto]   visible error selector — will rotate VPN and retry`);
+      errorStrs.push(lastOutcome.message || 'visible error selector triggered');
+      break;
+    }
+
     // Accumulate all errors
     if (lastOutcome.message && !errorStrs.includes(lastOutcome.message)) {
       errorStrs.push(lastOutcome.message);
