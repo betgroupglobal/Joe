@@ -412,13 +412,18 @@ export async function runLoginAuto(
         ignoreHTTPSErrors: true as any,
       } as any);
 
+      const ctxOpts = getStealthContextOptions();
       const context = await browser.newContext({
-        ...getStealthContextOptions(),
+        ...ctxOpts,
         ignoreHTTPSErrors: true as any,
       } as any);
 
       const page = await context.newPage();
-      await injectDeepStealth(page, `login-${username}-${Date.now()}-r${retryNum}`);
+      const fpSeed = `login-${username}-${Date.now()}-r${retryNum}`;
+      await injectDeepStealth(page, fpSeed);
+      if (retryNum > 0) {
+        console.log(`[auto]   new fingerprint: UA=${(ctxOpts.userAgent || '').slice(-30)} viewport=${ctxOpts.viewport?.width}x${ctxOpts.viewport?.height}`);
+      }
 
       const t0 = Date.now();
       attempt.timestamp = new Date().toISOString();
@@ -446,12 +451,14 @@ export async function runLoginAuto(
           // Permanently locked account — no point retrying, move to next cred
           console.log(`[auto] ✗ account permanently locked: ${username} — moving on`);
         } else if (retryNum < MAX_VISIBLE_ERROR_RETRIES) {
-          // Any other non-success after 3 clicks → rotate VPN and retry with fresh session
-          console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN and retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})...`);
+          // Non-success → rotate VPN + fresh fingerprint and retry
+          const isVisibleError = (outcome.message || '').includes('visible error selector triggered');
+          console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN + fingerprint, retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})${isVisibleError ? ' [IMMEDIATE]' : ''}...`);
           if (activeVpn) vpnFail(activeVpn);
           activeVpn = rotate();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = true;
+          (attempt as any)._immediateRetry = isVisibleError;
         } else {
           console.log(`[auto] ✗ miss: ${username} (${attempt.reason}) — exhausted all retries`);
         }
@@ -474,10 +481,12 @@ export async function runLoginAuto(
 
       if (!shouldRetry) break;
 
-      // Wait before retry with new VPN
-      const retryDelay = 2000;
-      console.log(`[auto] Waiting 2s before retry...`);
-      await new Promise(r => setTimeout(r, retryDelay));
+      // Immediate retry on visible error selector, 2s delay otherwise
+      if (!(attempt as any)._immediateRetry) {
+        console.log(`[auto] Waiting 2s before retry...`);
+        await new Promise(r => setTimeout(r, 2000));
+      }
+      console.log(`[auto] Retrying with new VPN: ${vpnName} + fresh fingerprint`);
     }
 
     appendResult(attempt);
