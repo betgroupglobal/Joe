@@ -163,7 +163,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
 
   // Fast-path: if URL already changed or clear error text, skip additional wait
   const stillOnLogin = postSubmitUrl.toLowerCase().includes('login') || postSubmitUrl.toLowerCase().includes('signin');
-  const hasQuickSignal = !stillOnLogin || SIGNALS.failure.keywords.some(s => bodyText.includes(s)) || SIGNALS.rateLimit.lockout.some(s => bodyText.includes(s));
+  const hasQuickSignal = urlChanged || SIGNALS.failure.keywords.some(s => bodyText.includes(s)) || SIGNALS.rateLimit.lockout.some(s => bodyText.includes(s));
 
   if (!hasQuickSignal) {
     // No clear signal yet — wait a bit more for the page to settle
@@ -566,9 +566,6 @@ export async function runLoginAuto(
     if (rotateEvery > 0 && i > 0 && i % rotateEvery === 0) {
       console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
       activeVpn = smartRotate();
-      if (!activeVpn) {
-        activeVpn = rotate(); // fallback to simple rotation
-      }
       if (!activeVpn) {
         console.warn('[auto] VPN rotation failed — continuing with current connection.');
       }
