@@ -72,10 +72,26 @@ export const STEALTH_LAUNCH_ARGS = [
 // Exported for backward compat — picks a random UA each time
 export const STEALTH_UA = pickRandom(UA_POOL);
 
-export function getStealthContextOptions(proxyUrl?: string): BrowserContextOptions {
+// Extended return type that includes platform metadata for injectDeepStealth
+export interface StealthContextResult extends BrowserContextOptions {
+  _navPlatform: string;
+  _uaDataPlatform: string;
+  _chromeVersion: string;
+}
+
+export function getStealthContextOptions(proxyUrl?: string): StealthContextResult {
   const viewport = pickRandom(VIEWPORT_POOL);
   const ua = pickRandom(UA_POOL);
   const isMac = ua.includes('Macintosh');
+  const isLinux = ua.includes('Linux') && !ua.includes('Android');
+
+  // Extract Chrome major version from UA string
+  const chromeMatch = ua.match(/Chrome\/(\d+)/);
+  const chromeVersion = chromeMatch ? chromeMatch[1] : '134';
+
+  // Platform consistency
+  const navPlatform = isMac ? 'MacIntel' : isLinux ? 'Linux x86_64' : 'Win32';
+  const uaDataPlatform = isMac ? 'macOS' : isLinux ? 'Linux' : 'Windows';
 
   return {
     viewport,
@@ -91,13 +107,16 @@ export function getStealthContextOptions(proxyUrl?: string): BrowserContextOptio
       }
     }),
     permissions: ['geolocation'],
-    // Extra HTTP headers to look more realistic
     extraHTTPHeaders: {
       'Accept-Language': 'en-AU,en;q=0.9',
-      'sec-ch-ua': `"Chromium";v="134", "Google Chrome";v="134", "Not:A-Brand";v="99"`,
+      'sec-ch-ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not:A-Brand";v="99"`,
       'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': isMac ? '"macOS"' : '"Windows"',
+      'sec-ch-ua-platform': isMac ? '"macOS"' : isLinux ? '"Linux"' : '"Windows"',
     },
+    // Platform metadata for injectDeepStealth
+    _navPlatform: navPlatform,
+    _uaDataPlatform: uaDataPlatform,
+    _chromeVersion: chromeVersion,
   };
 }
 
@@ -184,13 +203,14 @@ function getAdjacentKey(char: string): string {
 }
 
 // ─── Bezier curve mouse movement (much more human than linear) ────────────────
+// Optimized: fewer steps (10-20 vs 15-35), lower per-step delay
 
 async function bezierMouseMove(
   page: Page, 
   fromX: number, fromY: number, 
   toX: number, toY: number
 ): Promise<void> {
-  const steps = randDelay(15, 35);
+  const steps = randDelay(10, 20);
   
   // Control points for cubic bezier (slight curve, not straight line)
   const cp1x = fromX + (toX - fromX) * 0.25 + randDelay(-40, 40);
@@ -209,12 +229,13 @@ async function bezierMouseMove(
     
     // Variable speed: slow at start/end, fast in middle (ease-in-out)
     const speedFactor = Math.sin(t * Math.PI);
-    await page.waitForTimeout(Math.max(1, Math.round(3 + (1 - speedFactor) * 8)));
+    await page.waitForTimeout(Math.max(1, Math.round(2 + (1 - speedFactor) * 5)));
   }
 }
 
 // ─── Advanced human simulation ────────────────────────────────────────────────
 
+// Optimized: reduced scroll steps, lower idle probability, removed rare click
 export async function simulateHuman(page: Page): Promise<void> {
   // Bezier mouse movement to a random position
   const startX = randDelay(100, 800);
@@ -224,48 +245,46 @@ export async function simulateHuman(page: Page): Promise<void> {
   
   await bezierMouseMove(page, startX, startY, endX, endY);
 
-  // Natural scroll (variable speed, sometimes overshoots)
-  const scrollAmount = randDelay(-200, 300);
-  const scrollSteps = randDelay(3, 8);
+  // Natural scroll (reduced steps: 2-4 vs 3-8)
+  const scrollAmount = randDelay(-150, 200);
+  const scrollSteps = randDelay(2, 4);
   for (let i = 0; i < scrollSteps; i++) {
     await page.mouse.wheel(0, Math.round(scrollAmount / scrollSteps + randDelay(-10, 10)));
-    await page.waitForTimeout(randDelay(20, 60));
+    await page.waitForTimeout(randDelay(15, 40));
   }
 
-  await page.waitForTimeout(randDelay(200, 600));
+  await page.waitForTimeout(randDelay(100, 300));
 
-  // Tab navigation noise (common human pattern)
-  if (Math.random() > 0.55) {
+  // Tab navigation noise (reduced probability: 30% vs 45%)
+  if (Math.random() > 0.7) {
     await page.keyboard.press('Tab');
-    await page.waitForTimeout(randDelay(100, 400));
+    await page.waitForTimeout(randDelay(80, 250));
     if (Math.random() > 0.5) {
       await page.keyboard.press('Shift+Tab');
     }
   }
 
-  // Rare idle pause (human looking at page, reading)
-  if (Math.random() < 0.2) {
-    await page.waitForTimeout(randDelay(500, 1500));
-  }
-
-  // Very rare viewport interaction
-  if (Math.random() < 0.08) {
-    await page.mouse.click(
-      randDelay(200, 1000),
-      randDelay(200, 600),
-      { button: 'left', delay: randDelay(15, 45) }
-    );
+  // Rare idle pause (reduced: 10% vs 20%, shorter duration)
+  if (Math.random() < 0.1) {
+    await page.waitForTimeout(randDelay(300, 800));
   }
 }
 
 // ─── Deep stealth injection ───────────────────────────────────────────────────
 // Comprehensive anti-fingerprinting and automation detection evasion
 
-export async function injectDeepStealth(page: Page, sessionSeed: string): Promise<void> {
+export async function injectDeepStealth(
+  page: Page,
+  sessionSeed: string,
+  opts?: { navPlatform?: string; uaDataPlatform?: string; chromeVersion?: string }
+): Promise<void> {
   const seedHash = crypto.createHash('sha256').update(sessionSeed).digest('hex');
   const seed = Number('0x' + seedHash.substring(0, 16));
+  const navPlatform = opts?.navPlatform || 'Win32';
+  const uaDataPlatform = opts?.uaDataPlatform || 'Windows';
+  const chromeVersion = opts?.chromeVersion || '134';
 
-  await page.addInitScript(({ seed }) => {
+  await page.addInitScript(({ seed, navPlatform, uaDataPlatform, chromeVersion }) => {
     // ─── Seeded PRNG ────────────────────────────────────────────────────
     let s = BigInt(seed);
     const lcg = () => {
@@ -316,21 +335,48 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
     };
 
     // ─── 2. WebGL fingerprint spoofing (GL1 + GL2) ──────────────────────
-    const WEBGL_VENDORS = [
-      'Google Inc. (NVIDIA)',
-      'Google Inc. (AMD)',
-      'Google Inc. (Intel)',
-    ];
-    const WEBGL_RENDERERS = [
-      'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    ];
-
-    const chosenVendor   = WEBGL_VENDORS[Math.floor(lcg() * WEBGL_VENDORS.length)];
-    const chosenRenderer = WEBGL_RENDERERS[Math.floor(lcg() * WEBGL_RENDERERS.length)];
+    // Platform-aware, GPU-brand-correlated vendor+renderer pairs
+    interface GpuGroup { vendor: string; renderers: string[]; }
+    const GPU_GROUPS_BY_PLATFORM: Record<string, GpuGroup[]> = {
+      Windows: [
+        { vendor: 'Google Inc. (NVIDIA)', renderers: [
+          'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+          'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        ]},
+        { vendor: 'Google Inc. (AMD)', renderers: [
+          'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
+          'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        ]},
+        { vendor: 'Google Inc. (Intel)', renderers: [
+          'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        ]},
+      ],
+      macOS: [
+        { vendor: 'Google Inc. (Apple)', renderers: [
+          'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)',
+          'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)',
+          'ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)',
+        ]},
+        { vendor: 'Google Inc. (Intel)', renderers: [
+          'ANGLE (Intel, ANGLE Metal Renderer: Intel(R) UHD Graphics 630, Unspecified Version)',
+        ]},
+      ],
+      Linux: [
+        { vendor: 'Google Inc. (Intel)', renderers: [
+          'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)',
+        ]},
+        { vendor: 'Google Inc. (AMD)', renderers: [
+          'ANGLE (AMD, AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7, DRM 3.49, 6.1.0), OpenGL 4.6)',
+        ]},
+        { vendor: 'Google Inc. (NVIDIA)', renderers: [
+          'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0)',
+        ]},
+      ],
+    };
+    const gpuGroups = GPU_GROUPS_BY_PLATFORM[uaDataPlatform] || GPU_GROUPS_BY_PLATFORM['Windows'];
+    const chosenGroup = gpuGroups[Math.floor(lcg() * gpuGroups.length)];
+    const chosenVendor = chosenGroup.vendor;
+    const chosenRenderer = chosenGroup.renderers[Math.floor(lcg() * chosenGroup.renderers.length)];
 
     function patchWebGL(proto: any) {
       const origGetParam = proto.getParameter;
@@ -397,7 +443,7 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => [4, 8, 12, 16][Math.floor(lcg() * 4)], configurable: true });
     Object.defineProperty(navigator, 'deviceMemory', { get: () => [4, 8, 16][Math.floor(lcg() * 3)], configurable: true });
     Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0, configurable: true });
-    Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+    Object.defineProperty(navigator, 'platform', { get: () => navPlatform, configurable: true });
     Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-AU', 'en-US', 'en']), configurable: true });
     Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
 
@@ -435,34 +481,43 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
     });
 
     // ─── 5. User-Agent Client Hints (navigatorUAData) ───────────────────
+    const CHROME_FULL_VERSIONS: Record<string, string> = {
+      '134': '134.0.6998.178',
+      '133': '133.0.6943.142',
+      '132': '132.0.6834.159',
+    };
+    const fullVersion = CHROME_FULL_VERSIONS[chromeVersion] || `${chromeVersion}.0.6998.178`;
+    const arch = uaDataPlatform === 'macOS' ? 'arm' : 'x86';
+    const platVer = uaDataPlatform === 'Windows' ? '15.0.0' : uaDataPlatform === 'macOS' ? '14.5.0' : '6.5.0';
+
     if ('userAgentData' in navigator) {
       Object.defineProperty(navigator, 'userAgentData', {
         get: () => ({
           brands: [
-            { brand: 'Chromium', version: '134' },
-            { brand: 'Google Chrome', version: '134' },
+            { brand: 'Chromium', version: chromeVersion },
+            { brand: 'Google Chrome', version: chromeVersion },
             { brand: 'Not:A-Brand', version: '99' },
           ],
           mobile: false,
-          platform: 'Windows',
+          platform: uaDataPlatform,
           getHighEntropyValues: () => Promise.resolve({
-            architecture: 'x86',
+            architecture: arch,
             bitness: '64',
             brands: [
-              { brand: 'Chromium', version: '134.0.6998.178' },
-              { brand: 'Google Chrome', version: '134.0.6998.178' },
+              { brand: 'Chromium', version: fullVersion },
+              { brand: 'Google Chrome', version: fullVersion },
               { brand: 'Not:A-Brand', version: '99.0.0.0' },
             ],
             fullVersionList: [
-              { brand: 'Chromium', version: '134.0.6998.178' },
-              { brand: 'Google Chrome', version: '134.0.6998.178' },
+              { brand: 'Chromium', version: fullVersion },
+              { brand: 'Google Chrome', version: fullVersion },
               { brand: 'Not:A-Brand', version: '99.0.0.0' },
             ],
             mobile: false,
             model: '',
-            platform: 'Windows',
-            platformVersion: '15.0.0',
-            uaFullVersion: '134.0.6998.178',
+            platform: uaDataPlatform,
+            platformVersion: platVer,
+            uaFullVersion: fullVersion,
           }),
         }),
         configurable: true,
@@ -632,5 +687,5 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
       return str.replace(/playwright|puppeteer|selenium|webdriver/gi, 'native');
     };
 
-  }, { seed: seed.toString() });
+  }, { seed: seed.toString(), navPlatform, uaDataPlatform, chromeVersion });
 }
