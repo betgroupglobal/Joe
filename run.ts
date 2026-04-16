@@ -3,19 +3,25 @@ import { STEALTH_LAUNCH_ARGS, STEALTH_UA, getStealthContextOptions, humanType, s
 
 import * as readline from 'readline';
 import { scanLogin } from './scanner';
-import { initProxies, nextProxy, getAllProxies, printProxyStats } from './proxy-rotator';
+import { initProxies, rotate, getAllProxies, printProxyStats, vpnDown, getActiveSlot, getPublicIp } from './proxy-rotator';
 
 async function launchBrowser() {
-  const proxy = nextProxy();
-  const proxyUrl = proxy.url;
-  console.log(`[menu] Using proxy: ${proxy.name} (${proxyUrl})`);
+  const active = getActiveSlot();
+  if (!active) {
+    console.log('[menu] No VPN active — rotating to first config...');
+    rotate();
+  }
+  const vpnName = getActiveSlot()?.name ?? 'none';
+  console.log(`[menu] Launching browser via VPN: ${vpnName}`);
+
   const browser = await chromium.launch({ 
     headless: false, 
     args: STEALTH_LAUNCH_ARGS,
     ignoreHTTPSErrors: true as any
   } as any);
+  // No proxy — traffic routes through the WireGuard VPN interface
   const context = await browser.newContext({
-    ...getStealthContextOptions(proxyUrl),
+    ...getStealthContextOptions(),
     ignoreHTTPSErrors: true as any
   } as any);
   const page = await context.newPage();
@@ -32,13 +38,32 @@ async function viewLogs() {
   console.log('Scan Logs:', scanLogs.slice(-5));
 }
 
-async function proxyStatus() {
-  const proxies = getAllProxies();
-  console.log(`\n[proxy] ${proxies.length} Hysteria2 SOCKS5 proxies available:`);
-  for (const p of proxies) {
-    console.log(`  ${p.name}: ${p.url} | ok:${p.successes} fail:${p.failures}`);
+async function vpnStatus() {
+  const active = getActiveSlot();
+  const ip = getPublicIp();
+  console.log(`\n[vpn] Active: ${active?.name ?? 'none'} | Public IP: ${ip ?? 'unknown'}`);
+  const all = getAllProxies();
+  console.log(`[vpn] ${all.length} WireGuard configs loaded:`);
+  for (const s of all) {
+    const marker = s === active ? ' ← active' : '';
+    console.log(`  ${s.name}: ok:${s.successes} fail:${s.failures} lastIP:${s.currentIp ?? 'N/A'}${marker}`);
   }
   printProxyStats();
+}
+
+async function vpnRotate() {
+  console.log('[vpn] Rotating to next ProtonVPN config...');
+  const slot = rotate();
+  if (slot) {
+    console.log(`[vpn] Now active: ${slot.name} (IP: ${slot.currentIp ?? 'checking...'})`);
+  } else {
+    console.log('[vpn] Rotation failed.');
+  }
+}
+
+async function vpnDisconnect() {
+  vpnDown();
+  console.log('[vpn] Disconnected.');
 }
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -47,11 +72,13 @@ async function menu() {
   console.clear();
   console.log(`
 Joe Stealth Menu:
-1. Launch Stealth Browser (via Hysteria2 proxy)
+1. Launch Stealth Browser (via ProtonVPN)
 2. Scan Login Form (enter URL)
 3. View Recent Logs
-4. Proxy Status (Hysteria2 SOCKS5 pool)
-5. Exit
+4. VPN Status (ProtonVPN WireGuard pool)
+5. VPN Rotate (switch to next AU server)
+6. VPN Disconnect
+7. Exit
   `);
 
   rl.question('Choice: ', async (choice) => {
@@ -69,9 +96,16 @@ Joe Stealth Menu:
         await viewLogs();
         break;
       case '4': 
-        await proxyStatus();
+        await vpnStatus();
         break;
-      case '5': 
+      case '5':
+        await vpnRotate();
+        break;
+      case '6':
+        await vpnDisconnect();
+        break;
+      case '7': 
+        vpnDown();
         rl.close();
         return;
     }
@@ -79,7 +113,6 @@ Joe Stealth Menu:
   });
 }
 
-// Init Hysteria2 proxy pool on startup
+// Init ProtonVPN WireGuard config pool on startup
 initProxies();
 menu();
-

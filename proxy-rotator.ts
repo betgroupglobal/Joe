@@ -1,84 +1,183 @@
-// proxy-rotator.ts — Hysteria2 SOCKS5 proxy rotation via SSH tunnels
-// Each proxy maps to a Hysteria2 client instance on the EC2 server,
-// tunneled to localhost via SSH port forwarding.
+// proxy-rotator.ts — ProtonVPN WireGuard IP rotation
+// Rotates through ProtonVPN AU WireGuard configs to get fresh IPs.
+// Each rotation does: wg-quick down <current> → wg-quick up <next>
+// Traffic flows directly through the VPN interface (no SOCKS5 proxy needed).
 
-export interface ProxySlot {
-  name: string;
-  url: string;        // socks5://127.0.0.1:<port>
-  port: number;
+import { execSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
+
+export interface VpnSlot {
+  name: string;        // e.g. "proton-AU-1"
+  configPath: string;  // absolute path to .conf file
   successes: number;
   failures: number;
-  lastUsed: number;   // timestamp
+  lastUsed: number;    // timestamp
+  currentIp: string | null;
 }
 
-// Default: 10 SSH-tunneled SOCKS5 ports (10801–10810) mapping to
-// EC2 Hysteria2 client instances on ports 1080–1089.
-const DEFAULT_BASE_PORT = 10801;
-const DEFAULT_COUNT     = 10;
+// ─── Config ────────────────────────────────────────────────────────────────────
 
-let slots: ProxySlot[] = [];
+const DEFAULT_CONFIG_DIR = process.env.PROTON_CONFIG_DIR || './proton_configs';
+
+let slots: VpnSlot[] = [];
 let currentIndex = 0;
+let activeSlot: VpnSlot | null = null;
 
-/** Initialise the proxy pool. Call once at startup. */
-export function initProxies(
-  basePort: number = DEFAULT_BASE_PORT,
-  count: number    = DEFAULT_COUNT,
-): ProxySlot[] {
-  slots = [];
-  for (let i = 0; i < count; i++) {
-    const port = basePort + i;
-    slots.push({
-      name:      `hy2-${i + 1}`,
-      url:       `socks5://127.0.0.1:${port}`,
-      port,
-      successes: 0,
-      failures:  0,
-      lastUsed:  0,
-    });
+// ─── Helpers ───────────────────────────────────────────────────────────────────
+
+function shell(cmd: string): string {
+  try {
+    return execSync(cmd, { encoding: 'utf8', timeout: 15000 }).trim();
+  } catch (err: any) {
+    console.error(`[vpn] shell error: ${err.message?.split('\n')[0]}`);
+    return '';
   }
+}
+
+/** Get current public IP (with timeout). */
+export function getPublicIp(): string | null {
+  try {
+    const ip = shell('curl -s --max-time 5 https://ifconfig.me');
+    return ip || null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Init ──────────────────────────────────────────────────────────────────────
+
+/** Scan a directory for WireGuard .conf files and build the VPN pool. */
+export function initProxies(configDir: string = DEFAULT_CONFIG_DIR): VpnSlot[] {
+  const absDir = path.resolve(configDir);
+
+  if (!fs.existsSync(absDir)) {
+    console.error(`[vpn] Config directory not found: ${absDir}`);
+    console.error(`[vpn] Create it and add ProtonVPN WireGuard .conf files.`);
+    console.error(`[vpn] Or set PROTON_CONFIG_DIR env var to the correct path.`);
+    return slots;
+  }
+
+  const files = fs.readdirSync(absDir)
+    .filter(f => f.endsWith('.conf'))
+    .sort();
+
+  if (files.length === 0) {
+    console.error(`[vpn] No .conf files found in ${absDir}`);
+    return slots;
+  }
+
+  slots = files.map((f, i) => ({
+    name:       path.basename(f, '.conf'),
+    configPath: path.join(absDir, f),
+    successes:  0,
+    failures:   0,
+    lastUsed:   0,
+    currentIp:  null,
+  }));
+
   currentIndex = 0;
-  console.log(`[proxy] Initialised ${slots.length} Hysteria2 SOCKS5 proxies (ports ${basePort}–${basePort + count - 1})`);
+  console.log(`[vpn] Loaded ${slots.length} ProtonVPN WireGuard configs from ${absDir}`);
+  for (const s of slots) {
+    console.log(`  • ${s.name}`);
+  }
   return slots;
 }
 
-/** Get the next proxy in round-robin order. */
-export function nextProxy(): ProxySlot {
-  if (slots.length === 0) initProxies();
+// ─── VPN control ───────────────────────────────────────────────────────────────
+
+/** Bring down the currently active VPN tunnel. */
+export function vpnDown(): boolean {
+  if (!activeSlot) return true;
+  console.log(`[vpn] Bringing down ${activeSlot.name}...`);
+  const result = shell(`sudo wg-quick down "${activeSlot.configPath}" 2>&1`);
+  console.log(`[vpn] ${result || 'done'}`);
+  activeSlot = null;
+  return true;
+}
+
+/** Bring up a specific VPN tunnel by slot. */
+export function vpnUp(slot: VpnSlot): boolean {
+  // Bring down current first
+  if (activeSlot) vpnDown();
+
+  console.log(`[vpn] Bringing up ${slot.name}...`);
+  const result = shell(`sudo wg-quick up "${slot.configPath}" 2>&1`);
+
+  if (result.includes('error') || result.includes('RTNETLINK')) {
+    console.error(`[vpn] Failed to bring up ${slot.name}: ${result}`);
+    return false;
+  }
+
+  console.log(`[vpn] ${result || 'done'}`);
+  activeSlot = slot;
+
+  // Get the new public IP
+  const ip = getPublicIp();
+  slot.currentIp = ip;
+  if (ip) {
+    console.log(`[vpn] Public IP: ${ip}`);
+  }
+
+  return true;
+}
+
+/** Rotate to the next VPN config in round-robin order. Returns the new active slot. */
+export function rotate(): VpnSlot | null {
+  if (slots.length === 0) {
+    console.error('[vpn] No VPN configs loaded. Call initProxies() first.');
+    return null;
+  }
+
   const slot = slots[currentIndex];
   slot.lastUsed = Date.now();
   currentIndex = (currentIndex + 1) % slots.length;
+
+  if (!vpnUp(slot)) {
+    console.warn(`[vpn] Failed to activate ${slot.name}, trying next...`);
+    // Try the next one
+    const nextSlot = slots[currentIndex];
+    currentIndex = (currentIndex + 1) % slots.length;
+    if (!vpnUp(nextSlot)) {
+      console.error('[vpn] Failed to activate fallback VPN. Proceeding without VPN.');
+      return null;
+    }
+    return nextSlot;
+  }
+
   return slot;
 }
 
-/** Get a specific proxy by index (0-based). */
-export function getProxy(index: number): ProxySlot {
-  if (slots.length === 0) initProxies();
-  return slots[index % slots.length];
+/** Get the currently active VPN slot (or null). */
+export function getActiveSlot(): VpnSlot | null {
+  return activeSlot;
 }
 
-/** Record a successful request through a proxy. */
-export function recordSuccess(slot: ProxySlot): void {
+// ─── Stats ─────────────────────────────────────────────────────────────────────
+
+export function recordSuccess(slot: VpnSlot): void {
   slot.successes++;
 }
 
-/** Record a failed request through a proxy. */
-export function recordFail(slot: ProxySlot): void {
+export function recordFail(slot: VpnSlot): void {
   slot.failures++;
 }
 
-/** Get all proxy slots (for stats/logging). */
-export function getAllProxies(): ProxySlot[] {
-  if (slots.length === 0) initProxies();
+export function getAllProxies(): VpnSlot[] {
   return [...slots];
 }
 
-/** Print a summary of proxy usage stats. */
 export function printProxyStats(): void {
-  console.log('\n[proxy] ─── Proxy Usage Stats ───');
+  console.log('\n[vpn] ─── VPN Usage Stats ───');
   for (const s of slots) {
     const total = s.successes + s.failures;
     const rate  = total > 0 ? ((s.successes / total) * 100).toFixed(0) : 'N/A';
-    console.log(`  ${s.name} (port ${s.port}): ${s.successes}/${total} ok (${rate}%)`);
+    console.log(`  ${s.name}: ${s.successes}/${total} ok (${rate}%) | last IP: ${s.currentIp ?? 'N/A'}`);
   }
-  console.log('[proxy] ─────────────────────────\n');
+  if (activeSlot) {
+    console.log(`  Active: ${activeSlot.name} (${activeSlot.currentIp ?? 'unknown IP'})`);
+  } else {
+    console.log('  Active: none');
+  }
+  console.log('[vpn] ──────────────────────\n');
 }

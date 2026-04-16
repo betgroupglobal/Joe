@@ -1,7 +1,7 @@
 import { chromium, Page, LaunchOptions, BrowserContextOptions } from 'playwright';
 import * as fs from 'fs';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, randDelay, humanType } from './stealth-utils';
-import { nextProxy } from './proxy-rotator';
+import { getActiveSlot } from './proxy-rotator';
 
 export interface ScanResult {
   url: string;
@@ -19,17 +19,17 @@ export interface ScanResult {
 export async function scanLogin(url: string): Promise<ScanResult> {
   if (!url.startsWith('http')) url = 'https://' + url;
 
-  const proxySlot = nextProxy();
-  const proxyUrl   = proxySlot.url;
-  console.log(`[scan] Using proxy: ${proxySlot.name} (${proxyUrl})`);
+  const activeVpn = getActiveSlot();
+  console.log(`[scan] Using VPN: ${activeVpn?.name ?? '(none — traffic goes direct)'}`);
 
   const browser = await chromium.launch({ 
     headless: false,
     args: STEALTH_LAUNCH_ARGS,
     ignoreHTTPSErrors: true as any // Bypass strict TS
   } as any);
+  // No proxy — traffic routes through the WireGuard VPN interface
   const context = await browser.newContext({
-    ...getStealthContextOptions(proxyUrl),
+    ...getStealthContextOptions(),
     ignoreHTTPSErrors: true as any // Bypass strict TS for HTTPS errors
   } as any);
   const page = await context.newPage();
