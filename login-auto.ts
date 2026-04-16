@@ -648,7 +648,7 @@ export async function runLoginAuto(
           const isVisibleError = (outcome.message || '').includes('visible error selector triggered');
           console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN + fingerprint, retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})${isVisibleError ? ' [IMMEDIATE]' : ''}...`);
           if (activeVpn) vpnFail(activeVpn);
-          activeVpn = smartRotate() || rotate();
+          activeVpn = smartRotate();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = true;
           (attempt as any)._immediateRetry = isVisibleError;
@@ -664,7 +664,7 @@ export async function runLoginAuto(
         if (activeVpn) vpnFail(activeVpn);
         if (isBlockError(err.message ?? '')) {
           console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
-          activeVpn = smartRotate() || rotate();
+          activeVpn = smartRotate();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
           // Force browser recycle on connection errors
