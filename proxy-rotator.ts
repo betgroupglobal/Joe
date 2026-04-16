@@ -127,10 +127,7 @@ export function initProxies(configDir: string = DEFAULT_CONFIG_DIR): VpnSlot[] {
   }));
 
   currentIndex = 0;
-  console.log(`[vpn] Loaded ${slots.length} ProtonVPN WireGuard configs from ${absDir}`);
-  for (const s of slots) {
-    console.log(`  • ${s.name}`);
-  }
+  console.log(`[vpn] ${slots.length} configs loaded`);
   return slots;
 }
 
@@ -139,10 +136,8 @@ export function initProxies(configDir: string = DEFAULT_CONFIG_DIR): VpnSlot[] {
 /** Bring down the currently active VPN tunnel. */
 export function vpnDown(): boolean {
   if (!activeSlot) return true;
-  console.log(`[vpn] Bringing down ${activeSlot.name}...`);
   const ipv4Conf = makeIpv4OnlyConfig(activeSlot.configPath);
-  const result = shell(`sudo wg-quick down "${ipv4Conf}" 2>&1`);
-  console.log(`[vpn] ${result || 'done'}`);
+  shell(`sudo wg-quick down "${ipv4Conf}" 2>&1`);
   activeSlot = null;
   return true;
 }
@@ -152,26 +147,20 @@ export function vpnUp(slot: VpnSlot): boolean {
   // Bring down current first
   if (activeSlot) vpnDown();
 
-  console.log(`[vpn] Bringing up ${slot.name} (IPv4-only)...`);
   const ipv4Conf = makeIpv4OnlyConfig(slot.configPath);
   const result = shell(`sudo wg-quick up "${ipv4Conf}" 2>&1`);
 
   // Check for specific WireGuard failure patterns (avoid false positives on benign output)
   const failPatterns = ['RTNETLINK', 'Cannot find device', 'Operation not permitted', 'No such file'];
   if (failPatterns.some(p => result.includes(p))) {
-    console.error(`[vpn] Failed to bring up ${slot.name}: ${result}`);
+    console.error(`[vpn] Failed: ${slot.name}`);
     return false;
   }
 
-  console.log(`[vpn] ${result || 'done'}`);
   activeSlot = slot;
-
-  // Get the new public IP
   const ip = getPublicIp();
   slot.currentIp = ip;
-  if (ip) {
-    console.log(`[vpn] Public IP: ${ip}`);
-  }
+  console.log(`[vpn] ${slot.name} → ${ip || '?'}`);
 
   return true;
 }
@@ -188,8 +177,7 @@ export function rotate(): VpnSlot | null {
   currentIndex = (currentIndex + 1) % slots.length;
 
   if (!vpnUp(slot)) {
-    console.warn(`[vpn] Failed to activate ${slot.name}, trying next...`);
-    // Try the next one
+    // Failed, trying next
     const nextSlot = slots[currentIndex];
     currentIndex = (currentIndex + 1) % slots.length;
     if (!vpnUp(nextSlot)) {
@@ -225,14 +213,13 @@ export function smartRotate(): VpnSlot | null {
     if (total >= MIN_ATTEMPTS_FOR_SKIP) {
       const failRate = slot.failures / total;
       if (failRate > MAX_FAILURE_RATE) {
-        console.log(`[vpn] Skipping ${slot.name} (${(failRate * 100).toFixed(0)}% fail rate, ${total} attempts)`);
+        // Skip high-fail-rate slot
         continue;
       }
     }
 
     slot.lastUsed = Date.now();
     if (vpnUp(slot)) return slot;
-    console.warn(`[vpn] Failed to activate ${slot.name}, trying next...`);
   }
 
   // All slots skipped or failed — force round-robin as last resort

