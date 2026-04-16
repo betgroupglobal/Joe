@@ -224,25 +224,48 @@ async function attemptLogin(
 
   const usernameCss = buildSel(usernameEl, 'input[type="email"], input[type="text"]');
   const passwordCss = buildSel(passwordEl, 'input[type="password"]');
-  const submitCss   = '#loginSubmit';
+  const submitCss   = buildSel(submitEl, '#loginSubmit');
+
+  console.log(`[login] selectors: user=${usernameCss} pass=${passwordCss} submit=${submitCss}`);
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await simulateHuman(page);
 
+  // Check if we need to click a "Login" button to open the form
   try {
     const loginNavBtn = 'body > div.ol-pos_sticky.ol-top_0.ol-z_docked > div > header > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__root.ol-headerRight__root--variant_center.ol-headerRight__root--size_lg.ol-headerRight__right.ol-headerRight__right--variant_center.ol-headerRight__right--size_lg > div.ol-headerRight__loggedOut.ol-headerRight__loggedOut--variant_center.ol-headerRight__loggedOut--size_lg > div > a';
     if (await page.isVisible(loginNavBtn)) {
+      console.log(`[login] Clicking specific login nav button`);
       await page.click(loginNavBtn, { timeout: 5000 });
       await page.waitForTimeout(2000);
     } else {
-      const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login")');
+      const genericBtn = await page.$('a:has-text("Login"), button:has-text("Login"), a:has-text("Log In"), button:has-text("Log In")');
       if (genericBtn && await genericBtn.isVisible()) {
+        console.log(`[login] Clicking generic Login button`);
         await genericBtn.click();
         await page.waitForTimeout(2000);
       }
     }
   } catch (e) {}
+
+  // Check form fields are visible before typing
+  const userVisible = await page.locator(usernameCss).first().isVisible().catch(() => false);
+  const passVisible = await page.locator(passwordCss).first().isVisible().catch(() => false);
+  const submitVisible = await page.locator(submitCss).first().isVisible().catch(() => false);
+  console.log(`[login] fields visible: user=${userVisible} pass=${passVisible} submit=${submitVisible}`);
+
+  if (!userVisible || !passVisible) {
+    console.warn(`[login] Form fields not visible — page may not have loaded correctly`);
+    // Try screenshot for debug
+    await page.screenshot({ path: `./debug_form_${Date.now()}.png`, fullPage: true }).catch(() => {});
+  }
+
+  // Bypass HTML5 email validation — some creds are usernames, not emails
+  await page.evaluate((sel) => {
+    const el = document.querySelector(sel) as HTMLInputElement | null;
+    if (el && el.type === 'email') el.type = 'text';
+  }, usernameCss);
 
   await humanType(page, usernameCss, username);
   await page.waitForTimeout(randDelay(300, 700));
@@ -259,7 +282,26 @@ async function attemptLogin(
       await page.waitForTimeout(randDelay(200, 400));
     }
 
-    await page.click(submitCss);
+    if (!await page.locator(submitCss).first().isVisible().catch(() => false)) {
+      console.warn(`[login] Submit button ${submitCss} not visible — trying fallback selectors`);
+      // Try common submit button selectors
+      const fallbacks = ['button[type="submit"]', 'input[type="submit"]', 'button:has-text("Login")', 'button:has-text("Log In")', 'button:has-text("Sign In")'];
+      let clicked = false;
+      for (const fb of fallbacks) {
+        if (await page.locator(fb).first().isVisible().catch(() => false)) {
+          console.log(`[login] Using fallback submit: ${fb}`);
+          await page.click(fb);
+          clicked = true;
+          break;
+        }
+      }
+      if (!clicked) {
+        console.error(`[login] No submit button found — pressing Enter as last resort`);
+        await page.keyboard.press('Enter');
+      }
+    } else {
+      await page.click(submitCss);
+    }
     lastOutcome = await detectOutcome(page, url);
 
     // Log each click result individually
