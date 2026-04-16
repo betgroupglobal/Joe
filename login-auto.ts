@@ -146,13 +146,13 @@ export async function runLoginAuto(
   credsFile:  string = './creds.txt',
   options: {
     delayBetweenMs?: [number, number]; // [min, max] delay between attempts
-    rotateEvery?:    number;            // rotate VPN every N attempts
+    rotateEvery?:    number;            // rotate VPN every N attempts (1 = every cred)
     stopOnSuccess?:  boolean;           // stop after first working cred
   } = {}
 ): Promise<void> {
   const {
     delayBetweenMs = [4000, 10000],
-    rotateEvery    = 5,
+    rotateEvery    = 1,
     stopOnSuccess  = false,
   } = options;
 
@@ -211,9 +211,9 @@ export async function runLoginAuto(
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
-    // Rotate VPN every N attempts
-    if (i > 0 && i % rotateEvery === 0) {
-      console.log(`\n[auto] Rotating VPN (every ${rotateEvery} attempts)...`);
+    // Rotate VPN for each new credential pair
+    if (i > 0) {
+      console.log(`\n[auto] Rotating VPN for next credential...`);
       activeVpn = rotate();
       if (!activeVpn) {
         console.warn('[auto] VPN rotation failed — continuing with current connection.');
