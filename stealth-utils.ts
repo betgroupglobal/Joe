@@ -72,17 +72,40 @@ export const STEALTH_LAUNCH_ARGS = [
 // Exported for backward compat — picks a random UA each time
 export const STEALTH_UA = pickRandom(UA_POOL);
 
-export function getStealthContextOptions(proxyUrl?: string): BrowserContextOptions {
+// Helper to extract Chrome major version from UA string
+function extractChromeVersion(ua: string): string {
+  const match = ua.match(/Chrome\/(\d+)/);
+  return match ? match[1] : '134';
+}
+
+// Helper to derive platform info from UA string
+function derivePlatformInfo(ua: string): { platform: string; navPlatform: string; uaDataPlatform: string; deviceScaleFactor: number } {
+  if (ua.includes('Macintosh')) {
+    return { platform: 'macOS', navPlatform: 'MacIntel', uaDataPlatform: 'macOS', deviceScaleFactor: 2 };
+  } else if (ua.includes('Linux')) {
+    return { platform: 'Linux', navPlatform: 'Linux x86_64', uaDataPlatform: 'Linux', deviceScaleFactor: 1 };
+  }
+  return { platform: 'Windows', navPlatform: 'Win32', uaDataPlatform: 'Windows', deviceScaleFactor: 1 };
+}
+
+export interface StealthContextResult extends BrowserContextOptions {
+  _chromeVersion: string;
+  _navPlatform: string;
+  _uaDataPlatform: string;
+}
+
+export function getStealthContextOptions(proxyUrl?: string): StealthContextResult {
   const viewport = pickRandom(VIEWPORT_POOL);
   const ua = pickRandom(UA_POOL);
-  const isMac = ua.includes('Macintosh');
+  const chromeVersion = extractChromeVersion(ua);
+  const platformInfo = derivePlatformInfo(ua);
 
   return {
     viewport,
     userAgent: ua,
     locale: 'en-AU',
     timezoneId: 'Australia/Sydney',
-    deviceScaleFactor: isMac ? 2 : 1,
+    deviceScaleFactor: platformInfo.deviceScaleFactor,
     hasTouch: false,
     isMobile: false,
     ...(proxyUrl && {
@@ -91,13 +114,17 @@ export function getStealthContextOptions(proxyUrl?: string): BrowserContextOptio
       }
     }),
     permissions: ['geolocation'],
-    // Extra HTTP headers to look more realistic
+    // Extra HTTP headers — version and platform derived from the chosen UA
     extraHTTPHeaders: {
       'Accept-Language': 'en-AU,en;q=0.9',
-      'sec-ch-ua': `"Chromium";v="134", "Google Chrome";v="134", "Not:A-Brand";v="99"`,
+      'sec-ch-ua': `"Chromium";v="${chromeVersion}", "Google Chrome";v="${chromeVersion}", "Not:A-Brand";v="99"`,
       'sec-ch-ua-mobile': '?0',
-      'sec-ch-ua-platform': isMac ? '"macOS"' : '"Windows"',
+      'sec-ch-ua-platform': `"${platformInfo.platform}"`,
     },
+    // Metadata for injectDeepStealth consistency
+    _chromeVersion: chromeVersion,
+    _navPlatform: platformInfo.navPlatform,
+    _uaDataPlatform: platformInfo.uaDataPlatform,
   };
 }
 
@@ -261,11 +288,18 @@ export async function simulateHuman(page: Page): Promise<void> {
 // ─── Deep stealth injection ───────────────────────────────────────────────────
 // Comprehensive anti-fingerprinting and automation detection evasion
 
-export async function injectDeepStealth(page: Page, sessionSeed: string): Promise<void> {
+export async function injectDeepStealth(
+  page: Page,
+  sessionSeed: string,
+  opts?: { navPlatform?: string; uaDataPlatform?: string; chromeVersion?: string }
+): Promise<void> {
   const seedHash = crypto.createHash('sha256').update(sessionSeed).digest('hex');
   const seed = Number('0x' + seedHash.substring(0, 16));
+  const navPlatform = opts?.navPlatform || 'Win32';
+  const uaDataPlatform = opts?.uaDataPlatform || 'Windows';
+  const chromeVersion = opts?.chromeVersion || '134';
 
-  await page.addInitScript(({ seed }) => {
+  await page.addInitScript(({ seed, navPlatform, uaDataPlatform, chromeVersion }) => {
     // ─── Seeded PRNG ────────────────────────────────────────────────────
     let s = BigInt(seed);
     const lcg = () => {
@@ -397,7 +431,7 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
     Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => [4, 8, 12, 16][Math.floor(lcg() * 4)], configurable: true });
     Object.defineProperty(navigator, 'deviceMemory', { get: () => [4, 8, 16][Math.floor(lcg() * 3)], configurable: true });
     Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0, configurable: true });
-    Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
+    Object.defineProperty(navigator, 'platform', { get: () => navPlatform, configurable: true });
     Object.defineProperty(navigator, 'languages', { get: () => Object.freeze(['en-AU', 'en-US', 'en']), configurable: true });
     Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
 
@@ -435,34 +469,38 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
     });
 
     // ─── 5. User-Agent Client Hints (navigatorUAData) ───────────────────
+    const fullVersion = `${chromeVersion}.0.6998.178`;
+    const arch = uaDataPlatform === 'macOS' ? 'arm' : 'x86';
+    const platVer = uaDataPlatform === 'Windows' ? '15.0.0' : uaDataPlatform === 'macOS' ? '14.5.0' : '6.5.0';
+
     if ('userAgentData' in navigator) {
       Object.defineProperty(navigator, 'userAgentData', {
         get: () => ({
           brands: [
-            { brand: 'Chromium', version: '134' },
-            { brand: 'Google Chrome', version: '134' },
+            { brand: 'Chromium', version: chromeVersion },
+            { brand: 'Google Chrome', version: chromeVersion },
             { brand: 'Not:A-Brand', version: '99' },
           ],
           mobile: false,
-          platform: 'Windows',
+          platform: uaDataPlatform,
           getHighEntropyValues: () => Promise.resolve({
-            architecture: 'x86',
+            architecture: arch,
             bitness: '64',
             brands: [
-              { brand: 'Chromium', version: '134.0.6998.178' },
-              { brand: 'Google Chrome', version: '134.0.6998.178' },
+              { brand: 'Chromium', version: fullVersion },
+              { brand: 'Google Chrome', version: fullVersion },
               { brand: 'Not:A-Brand', version: '99.0.0.0' },
             ],
             fullVersionList: [
-              { brand: 'Chromium', version: '134.0.6998.178' },
-              { brand: 'Google Chrome', version: '134.0.6998.178' },
+              { brand: 'Chromium', version: fullVersion },
+              { brand: 'Google Chrome', version: fullVersion },
               { brand: 'Not:A-Brand', version: '99.0.0.0' },
             ],
             mobile: false,
             model: '',
-            platform: 'Windows',
-            platformVersion: '15.0.0',
-            uaFullVersion: '134.0.6998.178',
+            platform: uaDataPlatform,
+            platformVersion: platVer,
+            uaFullVersion: fullVersion,
           }),
         }),
         configurable: true,
@@ -632,5 +670,5 @@ export async function injectDeepStealth(page: Page, sessionSeed: string): Promis
       return str.replace(/playwright|puppeteer|selenium|webdriver/gi, 'native');
     };
 
-  }, { seed: seed.toString() });
+  }, { seed: seed.toString(), navPlatform, uaDataPlatform, chromeVersion });
 }

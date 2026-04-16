@@ -3,6 +3,7 @@ dist/
 .DS_Store
 creds.txt
 login_results.json
+login_results.txt
 scan_results.json
 scan_error*.png
 *.log
@@ -11,4 +12,9 @@ autoform 2/debug_*.png
 autoform 2/__pycache__/
 autoform 2/*.pyc
 .codebuddy/
+proton_configs/
+attempt_*.png
+hit_*.png
+debug_form_*.png
+scan_*.png
 
