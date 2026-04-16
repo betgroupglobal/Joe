@@ -880,11 +880,20 @@ process.on('SIGTERM', cleanup);
 
 // ── Allow direct execution ────────────────────────────────────────────────────
 if (require.main === module) {
-  // Parse --concurrency=N from argv
-  const concurrencyArg = process.argv.find(a => a.startsWith('--concurrency='));
-  const concurrency = concurrencyArg ? parseInt(concurrencyArg.split('=')[1], 10) || 3 : 3;
-  const url = process.argv.find(a => !a.startsWith('--') && !a.includes('ts-node') && !a.includes('login-auto') && a !== process.argv[0]) 
-    || 'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.joefortunepokies.win/&ved=2ahUKEwj9tdzIxPGTAxU6R2cHHSV2E5wQFnoECBcQAQ&usg=AOvVaw17UV8uR6npKRS-mDVv-s0x';
+  // Parse CLI args (skip argv[0]=node and argv[1]=script)
+  const args = process.argv.slice(2);
+  let concurrency = 3;
+  let url = 'https://www.google.com/url?sa=t&source=web&rct=j&opi=89978449&url=https://www.joefortunepokies.win/&ved=2ahUKEwj9tdzIxPGTAxU6R2cHHSV2E5wQFnoECBcQAQ&usg=AOvVaw17UV8uR6npKRS-mDVv-s0x';
+
+  for (const arg of args) {
+    if (arg.startsWith('--concurrency=')) {
+      concurrency = parseInt(arg.split('=')[1], 10) || 3;
+    } else if (arg.startsWith('http')) {
+      url = arg;
+    }
+    // ignore anything else (e.g. stray flags)
+  }
+
   runLoginAuto(url, './creds.txt', { concurrency })
     .then(() => { vpnDown(); })
     .catch(e => { console.error(e); vpnDown(); process.exit(1); });
