@@ -465,8 +465,8 @@ export async function runLoginAuto(
       if (!shouldRetry) break;
 
       // Wait before retry with new VPN
-      const retryDelay = randDelay(3000, 6000);
-      console.log(`[auto] Waiting ${(retryDelay / 1000).toFixed(1)}s before retry...`);
+      const retryDelay = 2000;
+      console.log(`[auto] Waiting 2s before retry...`);
       await new Promise(r => setTimeout(r, retryDelay));
     }
 
