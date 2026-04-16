@@ -437,6 +437,16 @@ function isBlockError(msg: string): boolean {
   return blockPhrases.some(p => msg.includes(p));
 }
 
+/** Detect if error was caused by browser being closed by another worker (e.g. rate-limit recovery) */
+function isBrowserClosedError(msg: string): boolean {
+  const closePhrases = [
+    'Browser closed', 'Target closed', 'Browser has been closed',
+    'Protocol error', 'Target page, context or browser has been closed',
+    'Session closed', 'Connection closed',
+  ];
+  return closePhrases.some(p => msg.includes(p));
+}
+
 // ─── Main automation loop ─────────────────────────────────────────────────────
 
 export async function runLoginAuto(
@@ -568,7 +578,6 @@ export async function runLoginAuto(
   }
 
   async function ensureBrowser(): Promise<Browser> {
-    if (browser && browser.isConnected()) return browser;
     await acquireMutex();
     try {
       if (browser && browser.isConnected()) return browser;
@@ -737,8 +746,12 @@ export async function runLoginAuto(
         attempt.reason     = err.message?.split('\n')[0] ?? 'unknown_error';
         attempt.durationMs = Date.now() - t0;
 
-        if (activeVpn) vpnFail(activeVpn);
-        if (isBlockError(err.message ?? '')) {
+        // Browser closed by another worker (rate-limit recovery / recycle) — just retry with new browser
+        if (isBrowserClosedError(err.message ?? '')) {
+          console.log(`[auto] Browser was recycled by another worker — will retry ${username}`);
+          shouldRetry = retryNum < MAX_VISIBLE_ERROR_RETRIES;
+        } else if (isBlockError(err.message ?? '')) {
+          if (activeVpn) vpnFail(activeVpn);
           console.warn(`[auto] Block/connection error on ${vpnName} — rotating VPN now.`);
           await safeRotateVpn();
           vpnName = activeVpn?.name ?? 'none';
@@ -747,6 +760,8 @@ export async function runLoginAuto(
             console.error(`[auto] recycleBrowser failed: ${e.message?.split('\n')[0]}`);
             shouldRetry = false;
           });
+        } else {
+          if (activeVpn) vpnFail(activeVpn);
         }
       }
 
