@@ -158,6 +158,22 @@ export async function runLoginAuto(
 
   if (!targetUrl.startsWith('http')) targetUrl = 'https://' + targetUrl;
 
+  // ── ProtonVPN WireGuard rotation (must activate BEFORE scanner/network) ──
+  const configDir = process.env.PROTON_CONFIG_DIR || './proton_configs';
+  const vpnSlots = initProxies(configDir);
+  if (vpnSlots.length === 0) {
+    console.error('[auto] No VPN configs found. Add ProtonVPN WireGuard .conf files to ./proton_configs/');
+    console.error('[auto] Or set PROTON_CONFIG_DIR=/path/to/configs');
+    return;
+  }
+
+  // Activate the first VPN before any network requests
+  let activeVpn = rotate();
+  if (!activeVpn) {
+    console.error('[auto] Failed to activate initial VPN. Cannot proceed.');
+    return;
+  }
+
   // ── Load creds ──────────────────────────────────────────────────────────────
   const creds = loadCreds(credsFile);
   if (creds.length === 0) {
@@ -184,22 +200,6 @@ export async function runLoginAuto(
     }
     selectors = scanResult.selectors;
     console.log(`[auto] Scanner found ${selectors.length} selector(s)`);
-  }
-
-  // ── ProtonVPN WireGuard rotation ─────────────────────────────────────────
-  const configDir = process.env.PROTON_CONFIG_DIR || './proton_configs';
-  const vpnSlots = initProxies(configDir);
-  if (vpnSlots.length === 0) {
-    console.error('[auto] No VPN configs found. Add ProtonVPN WireGuard .conf files to ./proton_configs/');
-    console.error('[auto] Or set PROTON_CONFIG_DIR=/path/to/configs');
-    return;
-  }
-
-  // Activate the first VPN before starting
-  let activeVpn = rotate();
-  if (!activeVpn) {
-    console.error('[auto] Failed to activate initial VPN. Cannot proceed.');
-    return;
   }
 
   // ── Stat tracking ────────────────────────────────────────────────────────────
