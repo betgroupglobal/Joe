@@ -110,6 +110,10 @@ async function detectOutcome(page: Page, originalUrl: string): Promise<DetailedO
   const html = (await page.content().catch(() => '')).toLowerCase();
   const urlChanged = postSubmitUrl.toLowerCase() !== originalUrl.toLowerCase();
 
+  // Debug: log first 200 chars of body text and URL comparison
+  console.log(`[detect] url: ${postSubmitUrl} (changed=${urlChanged})`);
+  console.log(`[detect] body[0:200]: "${bodyText.substring(0, 200)}"`);
+
   // 1. CAPTCHA Detection
   // Only trigger if a CAPTCHA iframe or known element is actually visible and takes up real estate,
   // to avoid false positives from site-wide invisible tracking scripts.
@@ -230,6 +234,11 @@ async function attemptLogin(
 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+
+  // Capture actual URL after redirect (not the Google redirect URL)
+  const actualLoginUrl = page.url();
+  console.log(`[login] actual URL after load: ${actualLoginUrl}`);
+
   await simulateHuman(page);
 
   // Check if we need to click a "Login" button to open the form
@@ -302,7 +311,7 @@ async function attemptLogin(
     } else {
       await page.click(submitCss);
     }
-    lastOutcome = await detectOutcome(page, url);
+    lastOutcome = await detectOutcome(page, actualLoginUrl);
 
     // Log each click result individually
     console.log(`[auto]   click ${attemptNum}/3: ${lastOutcome.outcome} — ${lastOutcome.message || 'no message'}`);
