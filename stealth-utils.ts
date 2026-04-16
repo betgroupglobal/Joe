@@ -335,18 +335,45 @@ export async function injectDeepStealth(
     };
 
     // ─── 2. WebGL fingerprint spoofing (GL1 + GL2) ──────────────────────
-    const WEBGL_VENDORS = [
-      'Google Inc. (NVIDIA)',
-      'Google Inc. (AMD)',
-      'Google Inc. (Intel)',
-    ];
-    const WEBGL_RENDERERS = [
-      'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
-      'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
-    ];
+    // Platform-aware WebGL vendors and renderers to avoid cross-reference detection
+    const WEBGL_VENDORS_BY_PLATFORM: Record<string, string[]> = {
+      Windows: [
+        'Google Inc. (NVIDIA)',
+        'Google Inc. (AMD)',
+        'Google Inc. (Intel)',
+      ],
+      macOS: [
+        'Google Inc. (Apple)',
+        'Google Inc. (Intel)',
+      ],
+      Linux: [
+        'Google Inc. (Intel)',
+        'Google Inc. (AMD)',
+        'Google Inc. (NVIDIA)',
+      ],
+    };
+    const WEBGL_RENDERERS_BY_PLATFORM: Record<string, string[]> = {
+      Windows: [
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (AMD, AMD Radeon RX 6700 XT Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (NVIDIA, NVIDIA GeForce GTX 1660 SUPER Direct3D11 vs_5_0 ps_5_0, D3D11)',
+        'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)',
+      ],
+      macOS: [
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)',
+        'ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)',
+        'ANGLE (Intel, ANGLE Metal Renderer: Intel(R) UHD Graphics 630, Unspecified Version)',
+      ],
+      Linux: [
+        'ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)',
+        'ANGLE (AMD, AMD Radeon RX 6700 XT (navi22, LLVM 15.0.7, DRM 3.49, 6.1.0), OpenGL 4.6)',
+        'ANGLE (NVIDIA, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.6.0)',
+      ],
+    };
+    const WEBGL_VENDORS = WEBGL_VENDORS_BY_PLATFORM[uaDataPlatform] || WEBGL_VENDORS_BY_PLATFORM['Windows'];
+    const WEBGL_RENDERERS = WEBGL_RENDERERS_BY_PLATFORM[uaDataPlatform] || WEBGL_RENDERERS_BY_PLATFORM['Windows'];
 
     const chosenVendor   = WEBGL_VENDORS[Math.floor(lcg() * WEBGL_VENDORS.length)];
     const chosenRenderer = WEBGL_RENDERERS[Math.floor(lcg() * WEBGL_RENDERERS.length)];
