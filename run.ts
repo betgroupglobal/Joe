@@ -3,7 +3,6 @@ import { STEALTH_LAUNCH_ARGS, STEALTH_UA, getStealthContextOptions, humanType, s
 
 import * as readline from 'readline';
 import { scanLogin } from './scanner';
-import { sudoAvailable } from './vpn-rotator';
 
 async function launchBrowser() {
   const proxyUrl = process.env.PROXY_URL || undefined; // set PROXY_URL=socks5://127.0.0.1:51820 when Proton VPN is up
@@ -37,7 +36,6 @@ async function protonProxy() {
 }
 
 async function vpnStatus() {
-  console.log('VPN sudo:', sudoAvailable() ? 'available' : 'run sudo -v first');
   console.log('Check: sudo wg show');
 }
 

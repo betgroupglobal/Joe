@@ -1,7 +1,6 @@
 import { chromium, Page, LaunchOptions, BrowserContextOptions } from 'playwright';
 import * as fs from 'fs';
 import { STEALTH_LAUNCH_ARGS, getStealthContextOptions, injectDeepStealth, simulateHuman, randDelay, humanType } from './stealth-utils';
-import { rotate, recordSuccess, recordFail, PROXY_URL } from './vpn-rotator';
 
 export interface ScanResult {
   url: string;
@@ -19,19 +18,8 @@ export interface ScanResult {
 export async function scanLogin(url: string): Promise<ScanResult> {
   if (!url.startsWith('http')) url = 'https://' + url;
 
-  // ── VPN rotation: ensure a working tunnel is active ──────────────────────
-  const failedTunnels = new Set<string>();
-  let activeName: string | null = null;
-
-  try {
-    activeName = await rotate(failedTunnels);
-  } catch (e: any) {
-    console.error('[scan] VPN rotation failed:', e.message);
-    activeName = null;
-  }
-
-  const proxyUrl = activeName ? PROXY_URL : (process.env.PROXY_URL || undefined);
-  console.log(`[scan] Using proxy: ${proxyUrl ?? '(none)'} | tunnel: ${activeName ?? 'none'}`);
+  const proxyUrl = process.env.PROXY_URL || undefined;
+  console.log(`[scan] Using proxy: ${proxyUrl ?? '(none)'}`);
 
   const browser = await chromium.launch({ 
     headless: false,
@@ -134,13 +122,10 @@ export async function scanLogin(url: string): Promise<ScanResult> {
       fs.writeFileSync('./login_results.json', JSON.stringify(loginLogs, null, 2));
     }
 
-    const loadMs = Date.now() - new Date(results.timestamp).getTime();
-    if (activeName) recordSuccess(activeName, loadMs);
     console.log(`Scan complete: ${results.selectors.length} selectors, screenshot saved`);
   } catch (error: any) {
     console.error('Scan error:', error.message);
     results.error = error.message;
-    if (activeName) recordFail(activeName);
     await page.screenshot({ path: `./scan_error_${Date.now()}.png`, fullPage: true });
     results.selectors = [];
   }
